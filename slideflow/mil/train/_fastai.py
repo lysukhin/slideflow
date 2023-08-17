@@ -21,7 +21,9 @@ from .._params import TrainerConfigFastAI, ModelConfigCLAM
 
 # -----------------------------------------------------------------------------
 
-def train(learner, config, callbacks=None, use_neptune=False, neptune_args=None):
+
+def train(learner, config, callbacks=None, use_neptune=False, 
+          neptune_workspace=None, neptune_api=None, neptune_name=None):
     """Train an attention-based multi-instance learning model with FastAI.
 
     Args:
@@ -30,8 +32,12 @@ def train(learner, config, callbacks=None, use_neptune=False, neptune_args=None)
 
     Keyword args:
         callbacks (list(fastai.Callback)): FastAI callbacks. Defaults to None.
-        use_neptune (bool,optional): Log training to neptune.ai
-        neptune_args (dict): Keyword arguments to specify neptune project data.
+        use_neptune (bool, optional): Use Neptune API logging.
+            Defaults to False.
+        neptune_api (str, optional): Neptune API token, used for logging.
+            Defaults to None.
+        neptune_workspace (str, optional): Neptune workspace.
+            Defaults to None.
     """
 
     cbs = [
@@ -40,7 +46,7 @@ def train(learner, config, callbacks=None, use_neptune=False, neptune_args=None)
     ]
 
     if use_neptune:
-        run = neptune.init_run(**neptune_args)
+        run = neptune.init_run(project=neptune_workspace,api_token=neptune_api,name=neptune_name)
         cbs.append(NeptuneCallback(run=run))
     if callbacks:
         cbs += callbacks
