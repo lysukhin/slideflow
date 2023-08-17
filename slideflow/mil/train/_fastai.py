@@ -21,6 +21,7 @@ from .._params import TrainerConfigFastAI, ModelConfigCLAM
 
 # -----------------------------------------------------------------------------
 
+
 def train(learner, config, callbacks=None, use_neptune=False, 
           neptune_workspace=None, neptune_api=None, neptune_name=None):
     """Train an attention-based multi-instance learning model with FastAI.
