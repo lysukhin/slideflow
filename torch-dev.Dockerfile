@@ -9,7 +9,7 @@ RUN apt update && \
     apt update
 
 # Build libvips 8.12 from source [slideflow requires 8.9+, latest deb in Ubuntu 18.04 is 8.4]
-RUN apt install build-essential devscripts -y && \
+RUN apt install build-essential devscripts tmux -y && \
     mkdir libvips && \
     mkdir scripts
 WORKDIR "/libvips"
@@ -25,10 +25,13 @@ RUN wget https://raw.githubusercontent.com/jamesdolezal/slideflow/2.0.1/scripts/
     chmod +x pixman_repair.sh
 
 # Install missing requirements
-
 RUN pip3 install jupyterlab && \
     pip3 install huggingface_hub && \
     pip3 install "timm<0.9" && \
     pip3 install fastai && \
-    pip3 install versioneer && \
-    pip3 install neptune-fastai
+    pip3 install versioneer
+
+RUN pip install icd10-cm \
+    pip install neptune && \
+    pip install neptune-fastai \
+    pip install nystrom-attention
