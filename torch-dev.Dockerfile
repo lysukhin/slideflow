@@ -29,7 +29,8 @@ RUN pip3 install jupyterlab && \
     pip3 install huggingface_hub && \
     pip3 install "timm<0.9" && \
     pip3 install fastai && \
-    pip3 install versioneer
+    pip3 install versioneer && \
+    pip3 install cupy-cuda11x
 
 RUN pip install icd10-cm \
     pip install neptune && \
