@@ -41,7 +41,7 @@ def train(learner, config, callbacks=None, use_neptune=False,
     """
 
     cbs = [
-        SaveModelCallback(fname=f"best_valid"),
+        SaveModelCallback(monitor="roc_auc_score", comp=np.greater, fname=f"best_valid"),
         CSVLogger()
     ]
 
@@ -93,8 +93,10 @@ def build_learner(config, *args, **kwargs) -> Tuple[Learner, Tuple[int, int]]:
 
     """
     if isinstance(config.model_config, ModelConfigCLAM):
+        print("clam")
         return _build_clam_learner(config, *args, **kwargs)
     else:
+        print("fastai")
         return _build_fastai_learner(config, *args, **kwargs)
 
 
