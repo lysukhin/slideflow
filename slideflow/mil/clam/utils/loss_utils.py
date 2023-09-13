@@ -29,13 +29,18 @@ def skm_to_fastai_clam(func, is_class=True, thresh=None, axis=-1, activation=Non
     if activation is None:
         activation = ActivationType.Sigmoid if (is_class and thresh is not None) else ActivationType.No
     return AccumMetricCLAM(func, dim_argmax=dim_argmax, activation=activation, thresh=thresh,
-                       to_np=True, invert_arg=True, **kwargs)
+                           to_np=True, invert_arg=True, **kwargs)
 
 def RocAuc(axis=-1, average='macro', sample_weight=None, max_fpr=None, multi_class='ovr'):
     "Area Under the Receiver Operating Characteristic Curve for single-label multiclass classification problems"
     assert multi_class in ['ovr', 'ovo']
     return skm_to_fastai_clam(skm.roc_auc_score, axis=axis, activation=ActivationType.Softmax, flatten=False,
-                         average=average, sample_weight=sample_weight, max_fpr=max_fpr, multi_class=multi_class)
+                              average=average, sample_weight=sample_weight, max_fpr=max_fpr, multi_class=multi_class)
+
+def AveragePrecision(axis=-1, average='macro', sample_weight=None):
+    "Area Under the Precision-Recall Curve for single-label multiclass classification problems"
+    return skm_to_fastai_clam(skm.average_precision_score, axis=axis, activation=ActivationType.Softmax, flatten=False,
+                              average=average, sample_weight=sample_weight)
 
 # -----------------------------------------------------------------------------
 

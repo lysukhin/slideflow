@@ -8,7 +8,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn import __version__ as sklearn_version
 from packaging import version
 from fastai.vision.all import (
-    DataLoader, DataLoaders, Learner, RocAuc, SaveModelCallback, CSVLogger, FetchPredsCallback
+    DataLoader, DataLoaders, Learner, RocAuc, SaveModelCallback, CSVLogger, FetchPredsCallback, EarlyStoppingCallback
 )
 
 from neptune.integrations.fastai import NeptuneCallback
@@ -41,8 +41,9 @@ def train(learner, config, callbacks=None, use_neptune=False,
     """
 
     cbs = [
-        SaveModelCallback(monitor="roc_auc_score", comp=np.greater, fname=f"best_valid"),
-        CSVLogger()
+        EarlyStoppingCallback(monitor="average_precision_score", comp=np.greater, patience=5),
+        SaveModelCallback(monitor="average_precision_score", comp=np.greater, fname=f"best_valid"),
+        CSVLogger(),
     ]
 
     if use_neptune:
@@ -93,10 +94,8 @@ def build_learner(config, *args, **kwargs) -> Tuple[Learner, Tuple[int, int]]:
 
     """
     if isinstance(config.model_config, ModelConfigCLAM):
-        print("clam")
         return _build_clam_learner(config, *args, **kwargs)
     else:
-        print("fastai")
         return _build_fastai_learner(config, *args, **kwargs)
 
 
@@ -155,7 +154,7 @@ def _build_clam_learner(
         train_dataset,
         batch_size=1,
         shuffle=True,
-        num_workers=1,
+        num_workers=8,
         drop_last=False,
         device=device
     )
@@ -191,7 +190,7 @@ def _build_clam_learner(
 
     # Create learning and fit.
     dls = DataLoaders(train_dl, val_dl)
-    learner = Learner(dls, model, loss_func=loss_func, metrics=[loss_utils.RocAuc()], path=outdir)
+    learner = Learner(dls, model, loss_func=loss_func, metrics=[loss_utils.RocAuc(), loss_utils.AveragePrecision()], path=outdir)
 
     return learner, (n_features, n_classes)
 
@@ -251,7 +250,7 @@ def _build_fastai_learner(
         train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
-        num_workers=1,
+        num_workers=8,
         drop_last=False,
         device=device
     )
