@@ -27,8 +27,7 @@ from slideflow import errors
 from functools import partial
 from os.path import exists, join
 from types import SimpleNamespace
-from typing import (Any, Callable, Dict, List, Optional, Tuple, Union,
-                    TYPE_CHECKING)
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Sequence
 
 import slideflow as sf
 import slideflow.slide.qc
@@ -37,11 +36,39 @@ from slideflow.util import log, path_to_name  # noqa F401
 from .report import ExtractionPDF  # noqa F401
 from .report import ExtractionReport, SlideReport
 from .utils import *
-from .backends import tile_worker, wsi_reader
+from .backends import tile_worker, wsi_reader, backend_formats
 
 
 warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 Image.MAX_IMAGE_PIXELS = 100000000000
+
+def calc_alignment(c, us, them, n=None):
+    idx, (x, y, xi, yi) = c
+    our_tile = us[xi, yi]
+    try:
+        their_tile = them[xi, yi]
+    except IndexError:
+        return None, c
+    if our_tile is None or their_tile is None:
+        return None, c
+    if n is not None:
+        our_tile = n.transform(our_tile[:, :, 0:3])
+        their_tile = n.transform(their_tile[:, :, 0:3])
+    try:
+        rough_alignment = sf.slide.utils._find_translation_matrix(their_tile, our_tile, h=50, search_window=53)
+    except cv2.error:
+        rough_alignment = None
+        log.debug("Initial rough alignment failed at x={}, y={} (grid {}, {})".format(
+            x, y, xi, yi
+        ))
+    else:
+        log.debug("Initial rough alignment complete at x={}, y={} (grid {}, {}): {}".format(
+            x, y, xi, yi, (int(np.round(-rough_alignment[0, 2])), int(np.round(-rough_alignment[1, 2])))
+        ))
+    try:
+        return align_by_translation(their_tile, our_tile, round=True, warp_matrix=rough_alignment), c
+    except errors.AlignmentError as e:
+        return 'error', c
 
 # -----------------------------------------------------------------------
 
@@ -258,12 +285,17 @@ class _BaseLoader:
             raise errors.SlideLoadError(
                 f"{self.name}: unsupported filetype '{self.filetype}'"
             )
+        if self.filetype.lower() not in backend_formats():
+            raise errors.IncompatibleBackendError(
+                f"{self.name}: filetype '{self.filetype}' is not supported "
+                f"by the current backend, {sf.slide_backend()}"
+            )
 
         # Collect basic slide information
         try:
             self.mpp = float(self.slide.mpp)
         except Exception as e:
-            raise errors.SlideLoadError(
+            raise errors.SlideMissingMPPError(
                 f"Slide [green]{self.name}[/] missing MPP ({OPS_MPP_X})"
             )
 
@@ -315,8 +347,8 @@ class _BaseLoader:
         # Calculate shape and stride
         self.downsample_level = ds_level
         self.downsample_dimensions = self.slide.level_dimensions[ds_level]
-        self.stride = int(self.extract_px // stride_div)
-        self.full_stride = int(self.full_extract_px // stride_div)
+        self.stride = int(np.round(self.extract_px / stride_div))
+        self.full_stride = int(np.round(self.full_extract_px / stride_div))
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -417,6 +449,391 @@ class _BaseLoader:
     def _build_coord(self):
         raise NotImplementedError
 
+    def align_to(
+        self,
+        slide: "_BaseLoader",
+        apply: bool = True,
+        *,
+        finetune_depth: Optional[Sequence[float]] = None,
+        normalizer: Optional[str] = 'reinhard_mask',
+        allow_errors: bool = False
+    ) -> Tuple[Tuple[int, int], float]:
+        """Align this slide to another slide.
+
+        Alignment is performed by first aligning thumbnails at low magnification
+        (mpp = 8), then progressively fine-tuning alignment at increasing
+        magnification (mpp = 1, 0.5, 0.25), focused on a dense tissue region.
+        The densest tissue region is identified using the QC mask, if available,
+        otherwise via Otsu thresholding.
+
+        Args:
+            slide (:class:`slideflow.WSI`): Slide to align to.
+            apply (bool): Whether to apply the alignment to the slide.
+
+        Keyword Args:
+            finetune_depth (Optional[List[int]]): List of magnifications at
+                which to fine-tune alignment. Defaults to [1, 0.5, 0.25].
+            normalizer (str, optional): Stain normalization method to use.
+                Defaults to 'reinhard_mask'.
+            allow_errors (bool): Whether to allow and ignore alignment errors
+                when finetuning at higher magnification. Defaults to False.
+
+        Returns:
+            Tuple of (x, y) offset and MSE of initial alignment.
+
+        Raises:
+            TypeError: If ``slide`` is not a :class:`slideflow.WSI` object.
+
+            AlignmentError: If initial, thumbnail-based alignment fails, or
+                if finetuning alignment fails at any magnification and
+                ``allow_errors`` is False.
+
+        """
+        from scipy import ndimage
+
+        if not isinstance(slide, _BaseLoader):
+            raise TypeError("Can only align to another slide.")
+
+        if finetune_depth is None:
+            finetune_depth = [1, 0.5, 0.25]
+
+        # Steps:
+        # 1. Identify tissue region as target for alignment.
+        # 2. Rough align with low-mag thumbnails (mpp = 8).
+        # 3. Fine-tune alignment at a dense tissue region (mpp = 1, 0.5, 0.25).
+
+        # --- 1. Identify tissue regions as targets for alignment. ------------
+
+        # Use QC mask (.qc_mask) if available, otherwise calculate one.
+        # Target should be the centroid of unmasked tissue regions, but
+        # there may be multiple distinct tissue regions.
+
+        # First, grab the QC mask, or make one if it is not available.
+        if self.qc_mask is not None:
+            mask = self.qc_mask
+        else:
+            mask = sf.slide.qc.Otsu()(self)
+
+        # Next, fill holes and remove small peaks through gaussian blur,
+        # thresholding, and morphological closing.
+        mask = skimage.morphology.binary_closing(
+            skimage.filters.gaussian(mask, sigma=5) > 0.5,
+            skimage.morphology.disk(5)
+        )
+
+        # For each pixel in the mask, calculate the nearest distance to an
+        # unmasked pixel. This will assist us with finding the densest areas
+        # of tissue.
+        distances = ndimage.distance_transform_edt(~mask)
+
+        # Find the coordinates of the pixel with the highest average distance.
+        # This is the center of the densest tissue region.
+        target = np.unravel_index(np.argmax(distances), distances.shape)
+
+        # Convert from mask coordinates to slide coordinates.
+        target = (
+            int(target[1] * (self.dimensions[0] / mask.shape[1])),
+            int(target[0] * (self.dimensions[1] / mask.shape[0]))
+        )
+        target_them = (
+            int(np.round(target[0] * (self.mpp / slide.mpp))),
+            int(np.round(target[1] * (self.mpp / slide.mpp)))
+        )
+        log.debug("Low-mag alignment complete.")
+        log.debug("Target for alignment (us): {}".format(target))
+        log.debug("Target for alignment (them, pre-alignment): {}".format(target_them))
+
+        # --- 2. Align low-mag thumbnails. ------------------------------------
+
+        # Calculate thumbnails for alignment.
+        our_thumb = np.array(self.thumb(mpp=8))
+        their_thumb = np.array(slide.thumb(mpp=8))
+
+        # Stain normalization
+        if normalizer is not None:
+            log.debug("Aligning with stain normalization: {}".format(normalizer))
+            if isinstance(normalizer, str):
+                norm = sf.norm.autoselect(normalizer, backend='opencv')
+            elif isinstance(normalizer, sf.norm.StainNormalizer):
+                norm = normalizer
+            else:
+                raise ValueError("normalizer must be a str or instance of StainNormalizer")
+            our_thumb = norm.transform(our_thumb[:, :, 0:3])
+            their_thumb = norm.transform(their_thumb[:, :, 0:3])
+
+        # Align thumbnails and adjust for scale.
+        try:
+            alignment_raw, mse = align_by_translation(
+                their_thumb, our_thumb, round=True, calculate_mse=True
+            )
+        except errors.AlignmentError:
+            raise errors.AlignmentError("Alignment failed at thumbnail (mpp=8)")
+        alignment = (int(np.round(alignment_raw[0] * (8 / self.mpp))),
+                     int(np.round(alignment_raw[1] * (8 / self.mpp))))
+        alignment_them = (-int(np.round(alignment_raw[0] * (8 / slide.mpp))),
+                          -int(np.round(alignment_raw[1] * (8 / slide.mpp))))
+
+        log.debug("Low-mag alignment (us): {}".format(alignment))
+        log.debug("Low-mag alignment (them): {}".format(alignment_them))
+
+        # --- 3. Fine-tune alignment at tissue regions. -----------------------
+
+        # Get the coordinates of the tissue region in both slides.
+        for finetune_mpp in finetune_depth:
+            if (finetune_mpp < self.mpp) or (finetune_mpp < slide.mpp):
+                log.debug("Skipping finetune at mpp={}".format(finetune_mpp))
+                continue
+            # Us
+            our_window_size = (
+                int(np.round(512 * (finetune_mpp/self.mpp))),
+                int(np.round(512 * (finetune_mpp/self.mpp)))
+            )
+            our_top_left = (
+                int(np.round(target[0] - (our_window_size[0]/2))),
+                int(np.round(target[1] - (our_window_size[1]/2)))
+            )
+            log.debug("Extracting mpp={} alignment window (ours) at window_size={}, top_left={}".format(
+                finetune_mpp, our_window_size, our_top_left)
+            )
+            our_region = self.slide.read_from_pyramid(
+                top_left=our_top_left,
+                window_size=our_window_size,
+                target_size=(512, 512),
+                convert='numpy',
+                flatten=True,
+                pad_missing=True
+            )
+            # Them
+            their_window_size = (
+                int(np.round(512 * (finetune_mpp/slide.mpp))),
+                int(np.round(512 * (finetune_mpp/slide.mpp)))
+            )
+            their_top_left = (
+                int(np.round(target_them[0] - (their_window_size[0]/2))) + alignment_them[0],
+                int(np.round(target_them[1] - (their_window_size[1]/2))) + alignment_them[1]
+            )
+            log.debug("Extracting mpp={} alignment window (theirs) at window_size={}, top_left={}".format(
+                finetune_mpp, their_window_size, their_top_left)
+            )
+            their_region = slide.slide.read_from_pyramid(
+                top_left=their_top_left,
+                window_size=their_window_size,
+                target_size=(512, 512),
+                convert='numpy',
+                flatten=True,
+                pad_missing=True
+            )
+
+            if normalizer is not None:
+                our_region = norm.transform(our_region[:, :, 0:3])
+                their_region = norm.transform(their_region[:, :, 0:3])
+
+            try:
+                rough_alignment = sf.slide.utils._find_translation_matrix(their_region, our_region, h=50, search_window=53)
+            except cv2.error:
+                rough_alignment = None
+                log.debug("Initial rough alignment failed at mpp={}".format(finetune_mpp))
+            else:
+                log.debug("Initial rough alignment complete at mpp={}".format(finetune_mpp))
+
+            # Finetune alignment on this region.
+            try:
+                alignment_fine = align_by_translation(their_region, our_region, round=True, warp_matrix=rough_alignment)
+            except errors.AlignmentError:
+                msg = "Alignment failed at finetuning (mpp={})".format(finetune_mpp)
+                if allow_errors:
+                    log.error(msg)
+                else:
+                    raise errors.AlignmentError(msg)
+            else:
+                alignment = (
+                    alignment[0] + int(np.round(alignment_fine[0] * (finetune_mpp/self.mpp))),
+                    alignment[1] + int(np.round(alignment_fine[1] * (finetune_mpp/self.mpp)))
+                )
+                alignment_them = (
+                    alignment_them[0] - int(np.round(alignment_fine[0] * (finetune_mpp/slide.mpp))),
+                    alignment_them[1] - int(np.round(alignment_fine[1] * (finetune_mpp/slide.mpp)))
+                )
+                log.debug("Finetune alignment complete at mpp={}.".format(finetune_mpp))
+                log.debug("Finetuned alignment (us) at mpp={}: {}".format(finetune_mpp, alignment))
+                log.debug("Finetuned alignment (them) at mpp={}: {}".format(finetune_mpp, alignment_them))
+
+        # If not applying alignment, return the base alignment and MSE.
+        if not apply:
+            log.info("Slide aligned with MSE {:.2f}".format(mse))
+            return alignment, mse  # type: ignore
+
+        # Apply alignment.
+        self.origin = alignment
+        log.info("Slide aligned with MSE {:.2f}. Origin set to {}".format(
+                mse, self.origin
+        ))
+
+        # Rebuild coordinates and reapply QC, if present.
+        self._build_coord()
+        if self.qc_mask is not None:
+            self.apply_qc_mask()
+
+        return alignment, mse  # type: ignore
+
+    def align_tiles_to(
+        self,
+        slide: "_BaseLoader",
+        normalizer: Optional[str] = 'reinhard_mask',
+        allow_errors: bool = True,
+        mask_on_fail: bool = True,
+        align_by: str = 'tile',
+        **kwargs
+    ) -> np.ndarray:
+
+        if align_by not in ('tile', 'fit'):
+            raise ValueError("align_by must be 'tile' or 'median'")
+
+        # Stain normalizer.
+        if normalizer is not None:
+            if isinstance(normalizer, str):
+                normalizer = sf.norm.autoselect(normalizer, backend='opencv')
+            elif not isinstance(normalizer, sf.norm.StainNormalizer):
+                raise ValueError("normalizer must be a str or instance of StainNormalizer")
+
+        # Perform coarse alignment.
+        self.align_to(
+            slide, apply=True, normalizer=normalizer, allow_errors=allow_errors, **kwargs
+        )
+
+        # Finetune alignment at each tile location.
+        from tqdm import tqdm
+
+        ctx = mp.get_context('spawn') if sf.slide_backend() == 'libvips' else mp.get_context('fork')
+        pool = ctx.Pool(sf.util.num_cpu())
+
+        alignment_grid = np.zeros((self.grid.shape[0], self.grid.shape[1], 2))
+        idx_to_remove = []
+        for tile_alignment, c in tqdm(pool.imap_unordered(partial(calc_alignment, us=self, them=slide, n=normalizer), enumerate(self.coord)), desc="Aligning tiles...", total=len(self.coord)):
+            idx, (x, y, xi, yi) = c
+            if tile_alignment == 'error':
+                msg = "Tile alignment failed at x={}, y={} (grid {}, {})".format(
+                    x, y, xi, yi
+                )
+                if allow_errors:
+                    log.debug(msg)
+                    continue
+                else:
+                    raise errors.AlignmentError(msg)
+            if tile_alignment is None and mask_on_fail:
+                self.grid[xi, yi] = False
+                idx_to_remove += [idx]
+            if tile_alignment is not None:
+                pixel_ratio = (self.full_extract_px / self.tile_px)
+                x_adjust = int(np.round(tile_alignment[0] * pixel_ratio))
+                y_adjust = int(np.round(tile_alignment[1] * pixel_ratio))
+                alignment_grid[xi, yi] = np.array([x_adjust, y_adjust])
+                log.debug("Tile alignment complete at x={}, y={} (grid {}, {}): adjust by {}, {}".format(
+                    x, y, xi, yi, x_adjust, y_adjust
+                ))
+
+                if align_by == 'tile':
+                    self.coord[idx, 0] += x_adjust
+                    self.coord[idx, 1] += y_adjust
+
+        pool.close()
+
+        all_tile_alignment = np.ma.masked_array(alignment_grid, mask=~np.repeat(self.grid[:, :, None], 2, axis=2))  # type: ignore
+
+        if align_by == 'fit':
+
+            x_adjustment_coordinates = alignment_to_list(all_tile_alignment[:, :, 0])
+            y_adjustment_coordinates = alignment_to_list(all_tile_alignment[:, :, 1])
+
+            x_centroid, x_normal = best_fit_plane(x_adjustment_coordinates)
+            y_centroid, y_normal = best_fit_plane(y_adjustment_coordinates)
+
+            fit_alignment = all_tile_alignment.copy()
+            for x in range(all_tile_alignment.shape[0]):
+                for y in range(all_tile_alignment.shape[1]):
+                    fit_alignment[x, y] = (
+                        int(np.round(z_on_plane(x, y, x_centroid, x_normal))),
+                        int(np.round(z_on_plane(x, y, y_centroid, y_normal)))
+                    )
+
+            remove_outliers = True
+            if remove_outliers:
+                # Calculate outlier threshold (90th percentile)
+                diff = np.abs(all_tile_alignment - fit_alignment)
+                diff = np.max(diff, axis=-1)
+                threshold = np.percentile(diff[~diff.mask].data, 90)
+                all_tile_alignment.mask[diff > threshold] = True
+                fit_alignment.mask = all_tile_alignment.mask
+
+                # Recalculate fit without outliers
+                log.debug('Recalculating fit without outliers')
+                x_adjustment_coordinates = alignment_to_list(all_tile_alignment[:, :, 0])
+                y_adjustment_coordinates = alignment_to_list(all_tile_alignment[:, :, 1])
+
+                x_centroid, x_normal = best_fit_plane(x_adjustment_coordinates)
+                y_centroid, y_normal = best_fit_plane(y_adjustment_coordinates)
+
+                for x in range(all_tile_alignment.shape[0]):
+                    for y in range(all_tile_alignment.shape[1]):
+                        all_tile_alignment[x, y] = (
+                            int(np.round(z_on_plane(x, y, x_centroid, x_normal))),
+                            int(np.round(z_on_plane(x, y, y_centroid, y_normal)))
+                        )
+            else:
+                all_tile_alignment = fit_alignment
+
+        for idx, (x, y, xi, yi) in enumerate(self.coord):
+            self.coord[idx, 0] += all_tile_alignment[xi, yi][0]
+            self.coord[idx, 1] += all_tile_alignment[xi, yi][1]
+
+        # Delete tiles that failed to align.
+        if idx_to_remove:
+            log.warning("Removing {} tiles that failed to align.".format(len(idx_to_remove)))
+            self.coord = np.delete(self.coord, idx_to_remove, axis=0)
+
+        log.info("Slide alignment complete and finetuned at each tile location.")
+
+        return all_tile_alignment
+
+    def show_alignment(
+        self,
+        slide: "_BaseLoader",
+        mpp: float = 4
+    ) -> Image.Image:
+        """Show aligned thumbnail of another slide."""
+        if not isinstance(slide, _BaseLoader):
+            raise TypeError("Can only align to another slide.")
+
+        # Calculate thumbnails for alignment.
+        our_thumb = np.array(self.thumb(mpp=mpp))
+        their_thumb = np.array(slide.thumb(mpp=mpp))
+
+        # Return an image of a thumbnail of the given slide,
+        # aligned to this slide.
+        return Image.fromarray(align_image(their_thumb, our_thumb))
+
+
+    def verify_alignment(
+        self,
+        slide: "_BaseLoader",
+        mpp: float = 4
+    ) -> float:
+        """Verify alignment to another slide by calculating MSE."""
+        if not isinstance(slide, _BaseLoader):
+            raise TypeError("Can only align to another slide.")
+
+        # Calculate thumbnails for alignment.
+        our_thumb = np.array(self.thumb(mpp=mpp))
+        their_thumb = np.array(slide.thumb(mpp=mpp))
+
+        aligned_theirs = align_image(their_thumb, our_thumb)
+
+        theirs_gray = cv2.cvtColor(aligned_theirs, cv2.COLOR_BGR2GRAY)
+        ours_gray = cv2.cvtColor(our_thumb, cv2.COLOR_BGR2GRAY)
+
+        return compute_alignment_mse(theirs_gray, ours_gray)
+
+
     def mpp_to_dim(self, mpp: float) -> Tuple[int, int]:
         width = int((self.mpp * self.dimensions[0]) / mpp)
         height = int((self.mpp * self.dimensions[1]) / mpp)
@@ -437,7 +854,8 @@ class _BaseLoader:
         blur_radius: int = 3,
         blur_threshold: float = 0.02,
         filter_threshold: float = 0.6,
-        blur_mpp: Optional[float] = None
+        blur_mpp: Optional[float] = None,
+        pool: Optional["mp.Pool"] = None
     ) -> Optional[Image.Image]:
         """Applies quality control to a slide, performing filtering based on
         a whole-slide image thumbnail.
@@ -482,9 +900,9 @@ class _BaseLoader:
         if 'blur' in method:
             idx = method.index('blur')  # type: ignore
             method.remove('blur')       # type: ignore
-            method.insert(idx, sf.slide.qc.Gaussian(mpp=blur_mpp,
-                                                    sigma=blur_radius,
-                                                    threshold=blur_threshold))
+            method.insert(idx, sf.slide.qc.GaussianV2(mpp=blur_mpp,
+                                                      sigma=blur_radius,
+                                                      threshold=blur_threshold))
         if 'otsu' in method:
             idx = method.index('otsu')  # type: ignore
             method.remove('otsu')       # type: ignore
@@ -496,6 +914,11 @@ class _BaseLoader:
         for qc in method:
             if isinstance(method, str):
                 raise errors.QCError(f"Unknown QC method {method}")
+            if pool is not None:
+                try:
+                    qc.pool = pool
+                except Exception as e:
+                    log.debug(f"Unable to set pool for QC method {qc}")
             mask = qc(self)
             if mask is not None:
                 img = self.apply_qc_mask(mask, filter_threshold=filter_threshold)
@@ -505,13 +928,14 @@ class _BaseLoader:
 
     def apply_qc_mask(
         self,
-        mask: np.ndarray,
+        mask: Optional[np.ndarray] = None,
         filter_threshold: float = 0.6,
     ) -> "Image":
         """Apply custom slide-level QC by filtering grid coordinates.
 
         Args:
-            mask (np.ndarray): Boolean QC mask.
+            mask (np.ndarray, optional): Boolean QC mask. If None, will
+                re-apply the current mask. Defaults to None.
             filter_threshold (float): Percent of a tile detected as
                 background that will trigger a tile to be discarded.
                 Defaults to 0.6.
@@ -519,6 +943,10 @@ class _BaseLoader:
         Returns:
             Image: Image of applied QC mask.
         """
+        if mask is None and self.qc_mask is None:
+            raise errors.QCError("No QC mask available")
+        elif mask is None:
+            mask = self.qc_mask
         assert isinstance(mask, np.ndarray)
         assert len(mask.shape) == 2
         assert mask.dtype == bool
@@ -710,8 +1138,9 @@ class _BaseLoader:
                 considered grayspace.
             normalizer (str, optional): Normalization to use on image tiles.
                 Defaults to None.
-            normalizer_source (str, optional): Path to normalizer source image.
-                If None, will use slideflow.slide.norm_tile.jpg.
+            normalizer_source (str, optional): Stain normalization preset or
+                path to a source image. Valid presets include 'v1', 'v2', and
+                'v3'. If None, will use the default present ('v3').
                 Defaults to None.
             full_core (bool, optional): Extract an entire detected core, rather
                 than subdividing into image tiles. Defaults to False.
@@ -879,7 +1308,13 @@ class _BaseLoader:
             log.debug("Skipping slide report")
             return None
 
-    def preview(self, rois: bool = True, **kwargs) -> Optional[Image.Image]:
+    def preview(
+        self,
+        rois: bool = True,
+        thumb_kwargs: Optional[Dict] = None,
+        low_res: bool = True,
+        **kwargs
+    ) -> Optional[Image.Image]:
         """Performs a dry run of tile extraction without saving any images,
         returning a PIL image of the slide thumbnail annotated with a grid of
         tiles that were marked for extraction.
@@ -907,6 +1342,10 @@ class _BaseLoader:
             yolo (bool, optional): Export yolo-formatted tile-level ROI
                 annotations (.txt) in the tile directory. Requires that
                 tiles_dir is set. Defaults to False.
+            thumb_kwargs (Optional[Dict], optional): Keyword arguments to pass
+                to the thumb method. Defaults to None.
+            low_res (bool, optional): Use low resolution thumbnail. Defaults to
+                True.
         """
         if 'show_progress' not in kwargs:
             kwargs['show_progress'] = (self.pb is None)
@@ -915,13 +1354,17 @@ class _BaseLoader:
             deterministic=False,
             **kwargs
         )
+        if thumb_kwargs is None:
+            thumb_kwargs = dict(low_res=low_res)
         if generator is None:
-            return self.thumb(rois=rois, low_res=True)
+            return self.thumb(rois=rois,  **thumb_kwargs)
         locations = []
         for tile_dict in generator():
             locations += [tile_dict['loc']]
         log.debug(f"Previewing with {len(locations)} extracted tile locations.")
-        return self.thumb(coords=locations, rois=rois, low_res=True)
+        return self.thumb(
+            coords=locations, rois=rois, **thumb_kwargs
+        )
 
 
 class WSI(_BaseLoader):
@@ -938,9 +1381,11 @@ class WSI(_BaseLoader):
         rois: Optional[List[str]] = None,
         roi_method: str = 'auto',
         roi_filter_method: Union[str, float] = 'center',
-        randomize_origin: bool = False,
+        origin: Union[str, Tuple[int, int]] = (0, 0),
         pb: Optional[Progress] = None,
         verbose: bool = True,
+        use_edge_tiles: bool = False,
+        randomize_origin: Optional[bool] = None,  # Deprecated
         **kwargs
     ) -> None:
         """Loads slide and ROI(s).
@@ -981,7 +1426,10 @@ class WSI(_BaseLoader):
                 ROI will be included, and a tile that is 50% inside of an ROI
                 will be excluded. Defaults to 'center'.
             randomize_origin (bool, optional): Offset the starting grid by a
-                random amount. Defaults to False.
+                random amount. Deprecated function. Instead, set origin='random'.
+                Defaults to None.
+            origin (str or tuple(int, int)): Offset the starting grid (x, y).
+                Either a tuple of ints or 'random'. Defaults to (0, 0).
             pb (:class:`Progress`, optional): Multiprocessing
                 capable Progress instance; will update progress bar during
                 tile extraction if provided.
@@ -1014,10 +1462,29 @@ class WSI(_BaseLoader):
         self.roi_scale = 10  # type: float
         self.roi_method = roi_method
         self.roi_filter_method = roi_filter_method
-        self.randomize_origin = randomize_origin
         self.verbose = verbose
         self.segmentation = None
         self.grid = None
+        self.use_edge_tiles = use_edge_tiles
+        if randomize_origin is not None:
+            warnings.warn(
+                "The 'randomize_origin' argument is deprecated and will be "
+                "removed in a future version. Please use the 'origin' "
+                "argument instead (origin='random').",
+                DeprecationWarning
+            )
+            if randomize_origin:
+                origin = 'random'
+        if isinstance(origin, str) and origin != 'random':
+            raise ValueError(
+                "Unrecognized value for argument 'origin': {} ."
+                "Expected either 'random' or a tuple of ints.".format(origin)
+            )
+        if isinstance(origin, tuple) and len(origin) != 2:
+            raise ValueError(
+                "If 'origin' is a tuple, it must be of length 2."
+            )
+        self.origin = origin
 
         if (not isinstance(roi_filter_method, (int, float))
            and roi_filter_method != 'center'):
@@ -1168,34 +1635,40 @@ class WSI(_BaseLoader):
     def _build_coord(self) -> None:
         '''Set up coordinate grid.'''
 
-        log.debug("Setting up coordinate grid.")
-
         # Calculate window sizes, strides, and coordinates for windows
         self.extracted_x_size = self.dimensions[0] - self.full_extract_px
         self.extracted_y_size = self.dimensions[1] - self.full_extract_px
 
         # Randomize origin, if desired
-        if self.randomize_origin:
+        if self.origin == 'random':
             start_x = random.randint(0, self.full_stride-1)
             start_y = random.randint(0, self.full_stride-1)
-            log.info(f"Random origin: X: {start_x}, Y: {start_y}")
         else:
-            start_x = start_y = 0
+            start_x, start_y = self.origin
+        log.debug("Slide origin: ({}, {})".format(start_x, start_y))
 
         # Coordinates must be in level 0 (full) format
         # for the read_region function
         self.coord = []  # type: Union[List, np.ndarray]
+        edge_buffer = 0 if self.use_edge_tiles else self.full_extract_px
         y_range = np.arange(
             start_y,
-            (self.dimensions[1]+1) - self.full_extract_px,
+            (self.dimensions[1]+1) - edge_buffer,
             self.full_stride
         )
         x_range = np.arange(
             start_x,
-            (self.dimensions[0]+1) - self.full_extract_px,
+            (self.dimensions[0]+1) - edge_buffer,
             self.full_stride
         )
+
         self.grid = np.ones((len(x_range), len(y_range)), dtype=bool)
+
+        # For any indexes in y_range or x_range corresponding to a negative value,
+        # set the corresponding index in self.grid to False.
+        # This may occur after slide alignment.
+        self.grid[np.argwhere(y_range < 0), :] = False
+        self.grid[:, np.argwhere(x_range < 0)] = False
 
         # ROI filtering
         roi_by_center = (self.roi_filter_method == 'center')
@@ -1246,6 +1719,12 @@ class WSI(_BaseLoader):
             for xi, x in enumerate(x_range):
                 y = int(y)
                 x = int(x)
+
+                # Skip the slide if the coordinate has a negative value.
+                # This may happen after slide alignment.
+                if x < 0 or y < 0:
+                    continue
+
                 self.coord.append([x, y, xi, yi])
 
                 # ROI filtering
@@ -1253,7 +1732,7 @@ class WSI(_BaseLoader):
                     point_in_roi = self.roi_mask[yi, xi]
                     # If the extraction method is 'inside',
                     # skip the tile if it's not in an ROI
-                    if (((self.roi_method == 'inside') and not point_in_roi)
+                    if (((self.roi_method in ('inside', 'auto')) and not point_in_roi)
                        or ((self.roi_method == 'outside') and point_in_roi)):
                         self.grid[xi, yi] = 0
 
@@ -1268,6 +1747,7 @@ class WSI(_BaseLoader):
 
         self.coord = np.array(self.coord)
         self.estimated_num_tiles = int(self.grid.sum())
+        log.debug(f"Set up coordinate grid, shape={self.grid.shape}")
 
     @property
     def shape(self):
@@ -1289,6 +1769,19 @@ class WSI(_BaseLoader):
         nonzero = self.seg_coord[:, 0] > 0
         self.seg_coord[:, 0:2][nonzero] -= int(self.full_extract_px/2)
         self.estimated_num_tiles = centroids.shape[0]
+
+    def area(self) -> float:
+        """Calculate area (mm^2) of slide that passes QC masking."""
+        dim_x, dim_y = self.dimensions[0], self.dimensions[1]
+        total_area_in_sq_microns = (dim_x * self.mpp) * (dim_y * self.mpp)
+        if self.qc_mask is not None:
+            s = self.qc_mask.shape
+            p = 1 - (self.qc_mask.sum() / (s[0] * s[1]))
+            area_in_sq_microns = p * total_area_in_sq_microns
+        else:
+            area_in_sq_microns = total_area_in_sq_microns
+        area_in_sq_mm = area_in_sq_microns * 1e-6
+        return area_in_sq_mm
 
     def get_tile_mask(self, index, sparse_mask):
 
@@ -1394,8 +1887,9 @@ class WSI(_BaseLoader):
                 considered grayspace.
             normalizer (str, optional): Normalization for image tiles.
                 Defaults to None.
-            normalizer_source (str, optional): Path to normalizer source image.
-                If None, will use slideflow.slide.norm_tile.jpg.
+            normalizer_source (str, optional): Stain normalization preset or
+                path to a source image. Valid presets include 'v1', 'v2', and
+                'v3'. If None, will use the default present ('v3').
                 Defaults to None.
             full_core (bool, optional): Extract an entire detected core, rather
                 than subdividing into image tiles. Defaults to False.
@@ -1472,7 +1966,7 @@ class WSI(_BaseLoader):
         whitespace_threshold: float = None,
         grayspace_fraction: float = None,
         grayspace_threshold: float = None,
-        normalizer: str = None,
+        normalizer: Optional[Union[str, "slideflow.norm.StainNormalizer"]] = None,
         normalizer_source: str = None,
         context_normalize: bool = False,
         num_threads: Optional[int] = None,
@@ -1508,8 +2002,9 @@ class WSI(_BaseLoader):
                 considered grayspace.
             normalizer (str, optional): Normalization strategy to use on image
                 tiles. Defaults to None.
-            normalizer_source (str, optional): Path to normalizer source image.
-                If None, will use slideflow.slide.norm_tile.jpg.
+            normalizer_source (str, optional): Stain normalization preset or
+                path to a source image. Valid presets include 'v1', 'v2', and
+                'v3'. If None, will use the default present ('v3').
                 Defaults to None.
             context_normalize (bool): If normalizing, use context from
                 the rest of the slide when calculating stain matrix
@@ -1547,6 +2042,9 @@ class WSI(_BaseLoader):
             deterministic (bool): Return tile images in reproducible,
                 deterministic order. May slightly decrease iteration time.
                 Defaults to True.
+            shard (tuple(int, int), optional): If provided, will only extract
+                tiles from the shard with index `shard[0]` out of `shard[1]`
+                shards. Defaults to None.
 
         Returns:
             dict: Dict with keys 'image' (image data), 'yolo' (optional
@@ -1695,10 +2193,10 @@ class WSI(_BaseLoader):
                 if num_threads is None and num_processes is None:
                     # Libvips is extremely slow with ThreadPools.
                     # In the cuCIM backend, ThreadPools are used by default
-                    # to reduce memory utilization.
+                    #   to reduce memory utilization.
                     # In the Libvips backend, a multiprocessing pool is default
-                    # to significantly improve performance.
-                    n_cores = os.cpu_count() if os.cpu_count() else 8
+                    #   to significantly improve performance.
+                    n_cores = sf.util.num_cpu(default=8)
                     if sf.slide_backend() == 'libvips':
                         num_processes = max(int(n_cores/2), 1)
                     else:
@@ -1708,8 +2206,10 @@ class WSI(_BaseLoader):
                     pool = mp.dummy.Pool(processes=num_threads)
                     should_close = True
                 elif num_processes is not None and num_processes > 1:
-                    log.debug(f"Building generator with Pool({num_processes})")
-                    ctx = mp.get_context('spawn')
+                    ptype = 'spawn' if sf.slide_backend() == 'libvips' else 'fork'
+                    log.debug(f"Building generator with Pool({num_processes}), "
+                              f"type={ptype}")
+                    ctx = mp.get_context(ptype)
                     pool = ctx.Pool(
                         processes=num_processes,
                         initializer=sf.util.set_ignore_sigint,
@@ -1793,7 +2293,8 @@ class WSI(_BaseLoader):
         linewidth: int = 2,
         color: str = 'black',
         use_associated_image: bool = False,
-        low_res: bool = False
+        low_res: bool = False,
+        **kwargs
     ) -> Image.Image:
         """Returns PIL Image of thumbnail with ROI overlay.
 
@@ -1836,7 +2337,8 @@ class WSI(_BaseLoader):
             width=width,
             coords=coords,
             use_associated_image=use_associated_image,
-            low_res=low_res
+            low_res=low_res,
+            **kwargs
         )
 
         if rois and len(self.rois):
@@ -1860,6 +2362,8 @@ class WSI(_BaseLoader):
         ]
         roi_id = list(set(list(range(len(existing)+1))) - set(existing))[0]
         self.rois.append(ROI(f'ROI_{roi_id}', array))
+        if self.roi_method == 'auto':
+            self.roi_method = 'inside'
         if process:
             self.process_rois()
 
@@ -1917,6 +2421,8 @@ class WSI(_BaseLoader):
             self.rois[-1].add_shape(area_reduced)
         if process:
             self.process_rois()
+        if self.roi_method == 'auto':
+            self.roi_method = 'inside'
         return len(self.rois)
 
     def masked_thumb(self, background: str = 'white', **kwargs) -> np.ndarray:
@@ -1939,7 +2445,7 @@ class WSI(_BaseLoader):
                 "Applying Otsu's thresholding & Gaussian blur filter "
                 "to stain norm context"
             )
-            _blur_mask = Gaussian()(image)
+            _blur_mask = GaussianV2()(image)
             qc_mask = Otsu()(image, mask=_blur_mask)
         # Mask by ROI and QC, if applied.
         # Use white as background for masked areas.
@@ -2058,6 +2564,10 @@ class WSI(_BaseLoader):
 
         # Regenerate the grid to reflect the newly-loaded ROIs.
         self._build_coord()
+
+        # Re-apply any existing QC mask, now that the coordinates have changed.
+        if self.qc_mask is not None:
+            self.apply_qc_mask()
 
         return len(self.rois)
 
@@ -2235,7 +2745,7 @@ class WSI(_BaseLoader):
         from slideflow.studio import Studio
 
         studio = Studio()
-        studio.load_slide(self.path, stride=self.stride_div)
+        studio.load_slide(self.path, stride=self.stride_div, tile_px=self.tile_px, tile_um=self.tile_um)
         studio.run()
 
 
@@ -2257,7 +2767,7 @@ class TMA(_BaseLoader):
         path: str,
         tile_px: int,
         tile_um: Union[str, int],
-        stride_div: int = 1,
+        stride_div: float = 1,
         enable_downsample: bool = True,
         report_dir: Optional[str] = None,
         pb: Optional[Progress] = None,
@@ -2270,7 +2780,7 @@ class TMA(_BaseLoader):
             tile_px (int): Size of tiles to extract, in pixels.
             tile_um (int or str): Size of tiles to extract, in microns (int) or
                 magnification (str, e.g. "20x").
-            stride_div (int, optional): Stride divisor for tile extraction
+            stride_div (float, optional): Stride divisor for tile extraction
                 (1 = no tile overlap; 2 = 50% overlap, etc). Defaults to 1.
             enable_downsample (bool, optional): Allow use of downsampled
                 layers in the slide image pyramid, which greatly improves
@@ -2492,8 +3002,9 @@ class TMA(_BaseLoader):
                 considered grayspace.
             normalizer (str, optional): Normalization for image tiles.
                 Defaults to None.
-            normalizer_source (str, optional): Path to normalizer source image.
-                If None, will use slideflow.slide.norm_tile.jpg.
+            normalizer_source (str, optional): Stain normalization preset or
+                path to a source image. Valid presets include 'v1', 'v2', and
+                'v3'. If None, will use the default present ('v3').
                 Defaults to None.
             full_core (bool, optional): Extract an entire detected core, rather
                 than subdividing into image tiles. Defaults to False.
@@ -2551,8 +3062,9 @@ class TMA(_BaseLoader):
                 considered grayspace.
             normalizer (str, optional): Normalization to use on image tiles.
                 Defaults to None.
-            normalizer_source (str, optional): Path to normalizer source image.
-                If None, will use slideflow.slide.norm_tile.jpg
+            normalizer_source (str, optional): Stain normalization preset or
+                path to a source image. Valid presets include 'v1', 'v2', and
+                'v3'. If None, will use the default present ('v3').
                 Defaults to None.
             num_threads (int, optional): Number of threads for pool. Unused if
                 `pool` is specified.
@@ -2589,9 +3101,7 @@ class TMA(_BaseLoader):
         )
         # Detect CPU cores if num_threads not specified
         if num_threads is None:
-            num_threads = os.cpu_count()
-            if num_threads is None:
-                num_threads = 8
+            num_threads = sf.util.num_cpu(default=8)
 
         # Shuffle TMAs
         if shuffle:

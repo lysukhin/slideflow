@@ -191,7 +191,7 @@ class StainNormalizer:
         if isinstance(arg1, Dataset):
             # Set up thread pool
             if num_threads == 'auto':
-                num_threads = os.cpu_count()  # type: ignore
+                num_threads = sf.util.num_cpu(default=8)  # type: ignore
             log.debug(f"Setting up pool (size={num_threads}) for norm fitting")
             log.debug(f"Using normalizer batch size of {batch_size}")
             pool = mp.dummy.Pool(num_threads)  # type: ignore
@@ -630,7 +630,7 @@ class StainNormalizer:
         When calculating max concentrations from the image context,
         white pixels (255) will be masked.
 
-         If a slide (``sf.WSI``) is used for context, any existing QC filters
+        If a slide (``sf.WSI``) is used for context, any existing QC filters
         and regions of interest will be used to mask out background as white
         pixels, and the masked thumbnail will be used for creating the
         normalizer context. If no QC has been applied to the slide and the
@@ -682,8 +682,13 @@ def autoselect(
         method (str): Normalization method. Options include 'macenko',
             'reinhard', 'reinhard_fast', 'reinhard_mask', 'reinhard_fast_mask',
             'vahadane', 'vahadane_spams', 'vahadane_sklearn', and 'augment'.
-        source (str, optional): Path to a source image. If provided, will
-            fit the normalizer to this image. Defaults to None.
+        source (str, optional): Stain normalization preset or path to a source
+            image. Valid presets include 'v1', 'v2', and 'v3'. If None, will
+            use the default present ('v3'). Defaults to None.
+        backend (str): Backend to use for native normalizers. Options include
+            'tensorflow', 'torch', and 'opencv'. If None, will use the current
+            backend, falling back to opencv/numpy if a native normalizer is
+            not available. Defaults to None.
 
     Returns:
         StainNormalizer:    Initialized StainNormalizer.
@@ -696,6 +701,8 @@ def autoselect(
     elif backend == 'torch':
         import slideflow.norm.torch
         BackendNormalizer = sf.norm.torch.TorchStainNormalizer  # type: ignore
+    elif backend == 'opencv':
+        BackendNormalizer = StainNormalizer
     else:
         raise errors.UnrecognizedBackendError
 

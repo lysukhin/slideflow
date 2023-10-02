@@ -3,13 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn as nn
 import slideflow as sf
+import numpy as np
 
 from torch.nn import Parameter
 from torchvision import transforms
 from huggingface_hub import hf_hub_download
 
 from ..base import BaseFeatureExtractor
-from ._slide import features_from_slide_torch
+from ._slide import features_from_slide
 
 # -----------------------------------------------------------------------------
 
@@ -276,10 +277,11 @@ class RetCCLFeatures(BaseFeatureExtractor):
 
     tag = 'retccl'
 
-    def __init__(self, device='cuda', center_crop=False):
+    def __init__(self, device=None, center_crop=False, ckpt=None):
         super().__init__(backend='torch')
 
-        self.device = device
+        from slideflow.model import torch_utils
+        self.device = torch_utils.get_device(device)
         self.model = ResNet50(
             block=Bottleneck,
             layers=[3, 4, 6, 3],
@@ -288,15 +290,17 @@ class RetCCLFeatures(BaseFeatureExtractor):
             two_branch=False,
             normlinear=True
         )
-        self.model.fc = torch.nn.Identity().to(device)
-
-        checkpoint_path = hf_hub_download(
-            repo_id='jamesdolezal/RetCCL',
-            filename='retccl.pth'
-        )
-        td = torch.load(checkpoint_path)
+        self.model.fc = torch.nn.Identity().to(self.device)
+        if ckpt is None:
+            ckpt = hf_hub_download(
+                repo_id='jamesdolezal/RetCCL',
+                filename='retccl.pth'
+            )
+        elif not isinstance(ckpt, str):
+            raise ValueError(f"Invalid checkpoint path: {ckpt}")
+        td = torch.load(ckpt, map_location=self.device)
         self.model.load_state_dict(td, strict=True)
-        self.model = self.model.to(device)
+        self.model = self.model.to(self.device)
         self.model.eval()
 
         # ---------------------------------------------------------------------
@@ -311,17 +315,32 @@ class RetCCLFeatures(BaseFeatureExtractor):
         ]
         self.transform = transforms.Compose(all_transforms)
         self.preprocess_kwargs = dict(standardize=False)
+        self._center_crop = center_crop
         # ---------------------------------------------------------------------
 
     def __call__(self, obj, **kwargs):
         """Generate features for a batch of images or a WSI."""
         if isinstance(obj, sf.WSI):
-            return features_from_slide_torch(
-                self,
-                obj,
-                device=self.device,
-                **kwargs
+            grid = features_from_slide(self, obj, **kwargs)
+            return np.ma.masked_where(grid == -99, grid)
+        elif kwargs:
+            raise ValueError(
+                f"{self.__class__.__name__} does not accept keyword arguments "
+                "when extracting features from a batch of images."
             )
         assert obj.dtype == torch.uint8
         obj = self.transform(obj)
         return self.model(obj)
+
+    def dump_config(self):
+        """Return a dictionary of configuration parameters.
+
+        These configuration parameters can be used to reconstruct the
+        feature extractor, using ``slideflow.model.build_feature_extractor()``.
+
+        """
+        cls_name = self.__class__.__name__
+        return {
+            'class': f'slideflow.model.extractors.retccl.{cls_name}',
+            'kwargs': {'center_crop': self._center_crop}
+        }

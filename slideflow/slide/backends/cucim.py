@@ -17,11 +17,17 @@ from slideflow.slide.utils import *
 if TYPE_CHECKING:
     from cucim import CuImage
 
+# -----------------------------------------------------------------------------
+
+SUPPORTED_BACKEND_FORMATS = ['svs', 'tif', 'tiff']
+
+# -----------------------------------------------------------------------------
 
 __cv2_resize__ = True
 __cuimage__ = None
 __cuimage_path__ = None
 
+# -----------------------------------------------------------------------------
 
 def get_cucim_reader(path: str, *args, **kwargs):
     return _cuCIMReader(path, *args, **kwargs)
@@ -193,7 +199,8 @@ class _cuCIMReader:
         mpp: Optional[float] = None,
         cache_kw: Optional[Dict[str, Any]] = None,
         num_workers: int = 0,
-        ignore_missing_mpp: bool = True
+        ignore_missing_mpp: bool = True,
+        use_bounds: bool = False,  #TODO: Not yet implemented
     ):
         '''Wrapper for cuCIM reader to preserve cross-compatible functionality.'''
         global __cuimage__, __cuimage_path__
@@ -232,7 +239,8 @@ class _cuCIMReader:
                 'dimensions': self.level_dimensions[lev],
                 'width': self.level_dimensions[lev][0],
                 'height': self.level_dimensions[lev][1],
-                'downsample': self.level_downsamples[lev]
+                'downsample': self.level_downsamples[lev],
+                'level': lev
             })
 
     @property
@@ -319,8 +327,8 @@ class _cuCIMReader:
             num_workers=self.num_workers,
         )
         if resize_factor:
-            target_size = (int(extract_size[0] * resize_factor),
-                           int(extract_size[1] * resize_factor))
+            target_size = (int(np.round(extract_size[0] * resize_factor)),
+                           int(np.round(extract_size[1] * resize_factor)))
             if not __cv2_resize__:
                 region = resize(np.asarray(region), target_size)
         # Final conversions

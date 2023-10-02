@@ -73,6 +73,8 @@ setuptools.setup(
             'studio/gui/buttons/button_slide.png',
             'studio/gui/buttons/small_button_gear.png',
             'studio/gui/buttons/button_gear.png',
+            'studio/gui/buttons/button_mil.png',
+            'studio/gui/buttons/button_mil_highlighted.png',
             'gan/stylegan2/stylegan2/torch_utils/ops/bias_act.cpp',
             'gan/stylegan2/stylegan2/torch_utils/ops/bias_act.cu',
             'gan/stylegan2/stylegan2/torch_utils/ops/bias_act.h',
@@ -104,14 +106,14 @@ setuptools.setup(
         'shapely',
         'umap-learn',
         'seaborn<0.12',
-        'pandas',
+        'pandas<2',
         'pyvips',
         'fpdf2',
         'lifelines',
         'scikit-image',
         'tqdm',
         'click',
-        'protobuf<=3.20.2',
+        'protobuf<3.21',
         'tensorboard',
         'crc32c',
         'h5py',
@@ -137,14 +139,15 @@ setuptools.setup(
         'tf': [
             'tensorflow>=2.7,<2.12',
             'tensorflow_probability<0.20',
-            'tensorflow_datasets'
+            'tensorflow_datasets<4.9.0'
         ],
         'torch': [
             'torch',
             'torchvision',
             'pretrainedmodels',
-            'cellpose',
-            'fastai'
+            'cellpose<2.2',
+            'fastai',
+            'timm<0.9'
         ],
         'dev': [
             'sphinx',
@@ -155,10 +158,10 @@ setuptools.setup(
             'cucim'
         ],
         'cellpose': [
-            'cellpose',
+            'cellpose<2.2',
         ],
         'all': [
-            'cellpose',
+            'cellpose<2.2',
             'cucim',
             'sphinx',
             'sphinx-markdown-tables',

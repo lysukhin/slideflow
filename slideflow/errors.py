@@ -59,6 +59,10 @@ class MismatchedImageFormatsError(DatasetError):
     pass
 
 
+class MismatchedSlideNamesError(DatasetError):
+    pass
+
+
 # --- Mosaic & Heatmap Errors -------------------------------------------------
 class HeatmapError(Exception):
     pass
@@ -67,6 +71,10 @@ class HeatmapError(Exception):
 class MosaicError(Exception):
     pass
 
+# --- TFRecord Heatmap Errors -------------------------------------------------
+
+class CoordinateAlignmentError(Exception):
+    pass
 
 # --- Project errors ----------------------------------------------------------
 class ProjectError(Exception):
@@ -101,6 +109,10 @@ class TFRecordsError(Exception):
     pass
 
 
+class TFRecordsIndexError(Exception):
+    pass
+
+
 class EmptyTFRecordsError(Exception):
     pass
 
@@ -125,7 +137,8 @@ class SlideNotFoundError(SlideError):
 class SlideMissingMPPError(SlideLoadError):
     pass
 
-
+class IncompatibleBackendError(SlideLoadError):
+    pass
 
 class ROIError(SlideError):
     pass
@@ -178,8 +191,14 @@ class ModelParamsNotFoundError(Exception):
     def __init__(self):
         super().__init__('Model parameters file (params.json) not found.')
 
+
 class SMACError(Exception):
     pass
 
+
 class ChecksumError(Exception):
+    pass
+
+
+class AlignmentError(Exception):
     pass

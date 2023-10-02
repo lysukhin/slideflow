@@ -40,7 +40,7 @@ from .project_utils import (  # noqa: F401
 )
 
 if TYPE_CHECKING:
-    from slideflow.model import DatasetFeatures, Trainer
+    from slideflow.model import DatasetFeatures, Trainer, BaseFeatureExtractor
     from slideflow.slide import SlideReport
     from slideflow import simclr, mil
     from ConfigSpace import ConfigurationSpace, Configuration
@@ -574,8 +574,12 @@ class Project:
             val_settings (:class:`types.SimpleNamspace`): Validation settings.
             ctx (multiprocessing.Context): Multiprocessing context for sharing
                 results from isolated training processes.
-            filters (dict): Dataset filters.
-            filter_blank (list): Excludes slides blank in this annotation col.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
+                Defaults to None.
             input_header (str or list(str)): Annotation col of additional
                 slide-level input.
             min_tiles (int): Only includes tfrecords with >= min_tiles
@@ -1185,9 +1189,11 @@ class Project:
                 to evaluate. If not supplied, will evaluate all project
                 tfrecords at the tile_px/tile_um matching the supplied model,
                 optionally using provided filters and filter_blank.
-            filters (dict, optional): Filters dict to use when selecting
-                tfrecords. Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             min_tiles (int, optional): Minimum number of tiles a slide must
                 have to be included in evaluation. Defaults to 0.
@@ -1275,7 +1281,9 @@ class Project:
         filter_blank: Optional[Union[str, List[str]]] = None,
         attention_heatmaps: bool = True
     ) -> None:
-        """Evaluate CLAM model on activations and export attention heatmaps.
+        """Deprecated function.
+
+        Evaluate CLAM model on activations and export attention heatmaps.
 
         Args:
             exp_name (str): Name of experiment to evaluate (subfolder in clam/)
@@ -1290,9 +1298,11 @@ class Project:
                 the model saved as s_{k}_checkpoint.pt. Defaults to 0.
             eval_tag (str, optional): Unique identifier for this evaluation.
                 Defaults to None
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             attention_heatmaps (bool, optional): Save attention heatmaps of
                 validation dataset. Defaults to True.
@@ -1301,6 +1311,10 @@ class Project:
             None
 
         """
+        warnings.warn("Project.evaluate_clam() is deprecated. Please use "
+                      "Project.evaluate_mil()",
+                      DeprecationWarning)
+
         import slideflow.clam as clam
         from slideflow.clam import export_attention
         from slideflow.clam import Generic_MIL_Dataset
@@ -1549,20 +1563,27 @@ class Project:
                 magnification (str, e.g. "20x").
 
         Keyword Args:
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
+                Defaults to None.
             save_tiles (bool, optional): Save tile images in loose format.
                 Defaults to False.
-            save_tfrecords (bool, optional): Save tile images as TFRecords.
-                Defaults to True.
-            source (str, optional): Process slides only from this source.
-                Defaults to None (all slides in project).
-            stride_div (int, optional): Stride divisor. Defaults to 1.
+            save_tfrecords (bool): Save compressed image data from
+                extracted tiles into TFRecords in the corresponding TFRecord
+                directory. Defaults to True.
+            source (str, optional): Name of dataset source from which to select
+                slides for extraction. Defaults to None. If not provided, will
+                default to all sources in project.
+            stride_div (int): Stride divisor for tile extraction.
                 A stride of 1 will extract non-overlapping tiles.
-                A stride_div of 2 will extract overlapping tiles with a stride
-                equal to 50% of the tile width.
-            enable_downsample (bool, optional): Enable downsampling when
-                reading slides. Defaults to True. This may result in corrupted
-                image tiles if downsampled slide layers are corrupted or
-                incomplete. Recommend manual confirmation of tile integrity.
+                A stride_div of 2 will extract overlapping tiles, with a stride
+                equal to 50% of the tile width. Defaults to 1.
+            enable_downsample (bool): Enable downsampling for slides.
+                This may result in corrupted image tiles if downsampled slide
+                layers are corrupted or incomplete. Defaults to True.
             roi_method (str): Either 'inside', 'outside', 'auto', or 'ignore'.
                 Determines how ROIs are used to extract tiles.
                 If 'inside' or 'outside', will extract tiles in/out of an ROI,
@@ -1572,57 +1593,74 @@ class Project:
                 If 'ignore', will extract tiles across the whole-slide
                 regardless of whether an ROI is available.
                 Defaults to 'auto'.
-            skip_extracted (bool, optional): Skip already extracted slides.
-                Defaults to True.
-            tma (bool, optional): Reads slides as Tumor Micro-Arrays (TMAs),
+            roi_filter_method (str or float): Method of filtering tiles with
+                ROIs. Either 'center' or float (0-1). If 'center', tiles are
+                filtered with ROIs based on the center of the tile. If float,
+                tiles are filtered based on the proportion of the tile inside
+                the ROI, and ``roi_filter_method`` is interpreted as a
+                threshold. If the proportion of a tile inside the ROI is
+                greater than this number, the tile is included. For example,
+                if ``roi_filter_method=0.7``, a tile that is 80% inside of an
+                ROI will be included, and a tile that is 50% inside of an ROI
+                will be excluded. Defaults to 'center'.
+            skip_extracted (bool): Skip slides that have already
+                been extracted. Defaults to True.
+            tma (bool): Reads slides as Tumor Micro-Arrays (TMAs),
                 detecting and extracting tumor cores. Defaults to False.
-            randomize_origin (bool, optional): Randomize pixel starting
+                Experimental function with limited testing.
+            randomize_origin (bool): Randomize pixel starting
                 position during extraction. Defaults to False.
-            buffer (str, optional): Copy slides here before extraction.
-                Improves processing speed if using an SSD/ramdisk buffer.
-                Defaults to None.
-            num_workers (int, optional): Extract tiles from this many slides
-                simultaneously. Defaults to 1.
-            q_size (int, optional): Queue size for buffer. Defaults to 2.
+            buffer (str, optional): Slides will be copied to this directory
+                before extraction. Defaults to None. Using an SSD or ramdisk
+                buffer vastly improves tile extraction speed.
+            q_size (int): Size of queue when using a buffer.
+                Defaults to 2.
             qc (str, optional): 'otsu', 'blur', 'both', or None. Perform blur
                 detection quality control - discarding tiles with detected
                 out-of-focus regions or artifact - and/or otsu's method.
-                Defaults to None.
-            report (bool, optional): Save a PDF report of tile extraction.
+                Increases tile extraction time. Defaults to None.
+            report (bool): Save a PDF report of tile extraction.
                 Defaults to True.
             normalizer (str, optional): Normalization strategy.
                 Defaults to None.
-            normalizer_source (str, optional): Path to normalizer source image.
-                Defaults to None (use internal image at slide.norm_tile.jpg).
-            whitespace_fraction (float, optional): Range 0-1. Defaults to 1.
-                Discard tiles with this fraction of whitespace. If 1, will not
-                perform whitespace filtering.
-            whitespace_threshold (int, optional): Range 0-255. Threshold above
-                which a pixel (RGB average) is considered whitespace.
-                Defaults to 230.
-            grayspace_fraction (float, optional): Range 0-1. Discard tiles with
-                this fraction of grayspace. If 1, will not perform grayspace
-                filtering. Defaults to 0.6.
-            grayspace_threshold (float, optional): Range 0-1. Pixels in HSV
-                format with saturation below this are considered grayspace.
-                Defaults to 0.05.
+            normalizer_source (str, optional): Stain normalization preset or
+                path to a source image. Valid presets include 'v1', 'v2', and
+                'v3'. If None, will use the default present ('v3').
+                Defaults to None.
+            whitespace_fraction (float, optional): Range 0-1. Discard tiles
+                with this fraction of whitespace. If 1, will not perform
+                whitespace filtering. Defaults to 1.
+            whitespace_threshold (int, optional): Range 0-255. Defaults to 230.
+                Threshold above which a pixel (RGB average) is whitespace.
+            grayspace_fraction (float, optional): Range 0-1. Defaults to 0.6.
+                Discard tiles with this fraction of grayspace.
+                If 1, will not perform grayspace filtering.
+            grayspace_threshold (float, optional): Range 0-1. Defaults to 0.05.
+                Pixels in HSV format with saturation below this threshold are
+                considered grayspace.
             img_format (str, optional): 'png' or 'jpg'. Defaults to 'jpg'.
-                Image format to use in tfrecords. PNG (lossless) for
-                fidelity, JPG (lossy) for efficiency.
-            full_core (bool, optional): Only used if extracting from TMA. Save
-                entire TMA core as image. Otherwise, will extract sub-images
-                from each core at the tile micron size. Defaults to False.
-            shuffle (bool, optional): Shuffle tiles before tfrecords storage.
-                Defaults to True.
-            num_threads (int, optional): Threads for each tile extractor.
-                Defaults to 4.
-            qc_blur_radius (int, optional): Blur radius for out-of-focus area
-                detection. Used if qc=True. Defaults to 3.
-            qc_blur_threshold (float, optional): Blur threshold for detecting
-                out-of-focus areas. Used if qc=True. Defaults to 0.1.
-            qc_filter_threshold (float, optional): Float between 0-1.
-                Tiles with more than this proportion of blur will be discarded.
-                Used if qc=True. Defaults to 0.6.
+                Image format to use in tfrecords. PNG (lossless) for fidelity,
+                JPG (lossy) for efficiency.
+            full_core (bool, optional): Only used if extracting from TMA.
+                If True, will save entire TMA core as image.
+                Otherwise, will extract sub-images from each core using the
+                given tile micron size. Defaults to False.
+            shuffle (bool, optional): Shuffle tiles prior to storage in
+                tfrecords. Defaults to True.
+            num_threads (int, optional): Number of worker processes for each
+                tile extractor. When using cuCIM slide reading backend,
+                defaults to the total number of available CPU cores, using the
+                'fork' multiprocessing method. With Libvips, this defaults to
+                the total number of available CPU cores or 32, whichever is
+                lower, using 'spawn' multiprocessing.
+            qc_blur_radius (int, optional): Quality control blur radius for
+                out-of-focus area detection. Used if qc=True. Defaults to 3.
+            qc_blur_threshold (float, optional): Quality control blur threshold
+                for detecting out-of-focus areas. Only used if qc=True.
+                Defaults to 0.1
+            qc_filter_threshold (float, optional): Float between 0-1. Tiles
+                with more than this proportion of blur will be discarded.
+                Only used if qc=True. Defaults to 0.6.
             qc_mpp (float, optional): Microns-per-pixel indicating image
                 magnification level at which quality control is performed.
                 Defaults to mpp=4 (effective magnification 2.5 X)
@@ -1657,6 +1695,9 @@ class Project:
         dry_run: bool = False,
         normalizer: Optional[str] = None,
         normalizer_source: Optional[str] = None,
+        tile_labels: Optional[str] = None,
+        crop: Optional[int] = None,
+        resize: Optional[int] = None,
         **kwargs
     ) -> None:
         """Train a GAN network.
@@ -1726,6 +1767,22 @@ class Project:
             outcomes (str, list(str), optional): Class conditioning outcome
                 labels for training a class-conditioned GAN. If not provided,
                 trains an unconditioned GAN. Defaults to None.
+            tile_labels (str, optional): Path to pandas dataframe with
+                tile-level labels. The dataframe should be indexed by tile name,
+                where the name of the tile follows the format:
+                [slide name]-[tile x coordinate]-[tile y coordinate], e.g.:
+                ``slide1-251-666``. The dataframe should have a single column
+                with the name 'label'. Labels can be categorical or continuous.
+                If categorical, the labels should be onehot encoded.
+            crop (int, optional): Randomly crop images to this target size
+                during training. This permits training a smaller network
+                (e.g. 256 x 256) on larger images (e.g. 299 x 299).
+                Defaults to None.
+            resize (int, optional): Resize images to this target size
+                during training. This permits training a smaller network
+                (e.g. 256 x 256) on larger images (e.g. 299 x 299).
+                If both ``crop`` and ``resize`` are provided, cropping
+                will be performed first. Defaults to None.
             resume (str): Load previous network. Options include
                 'noresume' , 'ffhq256', 'ffhq512', 'ffhqq1024', 'celebahq256',
                 'lsundog256', <file>, or <url>. Defaults to 'noresume'.
@@ -1765,6 +1822,10 @@ class Project:
             outcome_label_headers=outcomes,
             filters=dataset._filters,
             filter_blank=dataset._filter_blank,
+            min_tiles=dataset._min_tiles,
+            tile_labels=tile_labels,
+            crop=crop,
+            resize=resize
         )
         if normalizer:
             config['normalizer_kwargs'] = dict(
@@ -1779,7 +1840,7 @@ class Project:
             outdir=gan_dir,
             dry_run=dry_run,
             slideflow=config_loc,
-            cond=(outcomes is not None),
+            cond=(outcomes is not None or tile_labels is not None),
             mirror=mirror,
             metrics=metrics,
             **kwargs)
@@ -1883,10 +1944,12 @@ class Project:
                 from which to generate activations. If not supplied, calculate
                 activations for all tfrecords compatible with the model,
                 optionally using provided filters and filter_blank.
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                 Defaults to None.
-            filter_blank (list, optional): Slides blank in these columns will
-                be excluded. Defaults to None.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
+                Defaults to None.
             min_tiles (int, optional): Only include slides with this minimum
                 number of tiles. Defaults to 0.
             max_tiles (int, optional): Only include maximum of this many tiles
@@ -1928,23 +1991,33 @@ class Project:
         return df
 
     @auto_dataset_allow_none
-    def generate_features_for_clam(
+    def generate_features_for_clam(self, *args, **kwargs):
+        warnings.warn(
+            "Project.generate_features_for_clam() is deprecated. "
+            "Please use .generate_feature_bags()",
+            DeprecationWarning
+        )
+        self.generate_feature_bags(*args, **kwargs)
+
+    @auto_dataset_allow_none
+    def generate_feature_bags(
         self,
-        model: str,
+        model: Union[str, "BaseFeatureExtractor"],
+        dataset: Optional[Dataset] = None,
         outdir: str = 'auto',
         *,
-        dataset: Optional[Dataset] = None,
         filters: Optional[Dict] = None,
         filter_blank: Optional[Union[str, List[str]]] = None,
         min_tiles: int = 16,
         max_tiles: int = 0,
-        layers: Union[str, List[str]] = 'postconv',
         force_regenerate: bool = False,
-        batch_size: int = 32
+        batch_size: int = 32,
+        slide_batch_size: int = 16,
+        **kwargs: Any
     ) -> str:
-        """Generate tile-level features for slides for use with CLAM.
+        """Generate tile-level features for slides for use with MIL models.
 
-        By default, CLAM features are saved in the ``pt_files`` folder
+        By default, features are exported to the ``pt_files`` folder
         within the project root directory.
 
         Args:
@@ -1958,29 +2031,37 @@ class Project:
                 from which to generate activations. If not supplied, calculate
                 activations for all tfrecords compatible with the model,
                 optionally using provided filters and filter_blank.
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                 Defaults to None.
-            filter_blank (list, optional): Slides blank in these columns will
-                be excluded. Defaults to None.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
+                Defaults to None.
             min_tiles (int, optional): Only include slides with this minimum
                 number of tiles. Defaults to 16.
             max_tiles (int, optional): Only include maximum of this many tiles
                 per slide. Defaults to 0 (all tiles).
             layers (list): Which model layer(s) generate activations.
-                Defaults to 'postconv'.
+                If ``model`` is a saved model, this defaults to 'postconv'.
+                Defaults to None.
             force_regenerate (bool): Forcibly regenerate activations
                 for all slides even if .pt file exists. Defaults to False.
             min_tiles (int, optional): Minimum tiles per slide. Skip slides
                 not meeting this threshold. Defaults to 16.
             batch_size (int): Batch size during feature calculation.
                 Defaults to 32.
+            slide_batch_size (int): Interleave feature calculation across
+                this many slides. Higher values may improve performance
+                but require more memory. Defaults to 16.
+            **kwargs: Additional keyword arguments are passed to
+                :class:`slideflow.DatasetFeatures`.
 
         Returns:
             Path to directory containing exported .pt files
 
         """
         # Check if the model exists and has a valid parameters file
-        if exists(model):
+        if isinstance(model, str) and exists(model):
             config = sf.util.get_model_config(model)
 
             if dataset is None:
@@ -2010,23 +2091,37 @@ class Project:
         # Ensure min_tiles is applied to the dataset.
         dataset = dataset.filter(min_tiles=min_tiles)
 
-        # If the model does not exist, check if it is an architecture name
+        # Check if the model is an architecture name
         # (for using an Imagenet pretrained model)
-        if sf.model.is_extractor(model):
-            log.info(f"Building feature extractor {model}.")
+        if isinstance(model, str) and sf.model.is_extractor(model):
+            log.info(f"Building feature extractor: [green]{model}[/]")
+            layer_kw = dict(layers=kwargs['layers']) if 'layers' in kwargs else dict()
             model = sf.model.build_feature_extractor(
-                model, tile_px=dataset.tile_px
+                model, tile_px=dataset.tile_px, **layer_kw
             )
 
             # Set the pt_files directory if not provided
             if outdir.lower() == 'auto':
                 outdir = join(self.root, 'pt_files', model.tag)
 
-        elif not exists(model):
+        elif isinstance(model, str) and not exists(model):
             raise ValueError(
                 f"'{model}' is neither a path to a saved model nor the name "
                 "of a valid feature extractor (use sf.model.list_extractors() "
                 "for a list of all available feature extractors).")
+
+        elif not isinstance(model, str):
+            from slideflow.model.base import BaseFeatureExtractor
+            if not isinstance(model, BaseFeatureExtractor):
+                raise ValueError(
+                    f"'{model}' is neither a path to a saved model nor the name "
+                    "of a valid feature extractor (use sf.model.list_extractors() "
+                    "for a list of all available feature extractors).")
+
+            log.info(f"Using feature extractor: [green]{model.tag}[/]")
+            # Set the pt_files directory if not provided
+            if outdir.lower() == 'auto':
+                outdir = join(self.root, 'pt_files', model.tag)
 
         # Create the pt_files directory
         if not exists(outdir):
@@ -2046,22 +2141,35 @@ class Project:
                 skip_p = f'{to_skip}/{len(all_slides)}'
                 log.info(f"Skipping {skip_p} finished slides.")
             if not slides_to_generate:
-                log.warn("No slides to generate CLAM features.")
+                log.warn("No slides for which to generate features.")
                 return outdir
             dataset = dataset.filter(filters={'slide': slides_to_generate})
             filtered_slides_to_generate = dataset.slides()
             log.info(f'Skipping {len(done)} files already done.')
             log.info(f'Working on {len(filtered_slides_to_generate)} slides')
 
-        # Set up activations interface
-        df = sf.DatasetFeatures(
-            model=model,
-            dataset=dataset,
-            layers=layers,
-            include_preds=False,
-            batch_size=batch_size
-        )
-        df.to_torch(outdir)
+        # Set up activations interface.
+        # Calculate features one slide at a time to reduce memory consumption.
+        for slide_batch in tqdm(sf.util.batch(dataset.slides(), slide_batch_size),
+                                total=len(dataset.slides()) // slide_batch_size):
+            try:
+                _dataset = dataset.remove_filter(filters='slide')
+            except errors.DatasetFilterError:
+                _dataset = dataset
+            _dataset = _dataset.filter(filters={'slide': slide_batch})
+            df = sf.DatasetFeatures(
+                model=model,
+                dataset=_dataset,
+                include_preds=False,
+                include_uncertainty=False,
+                batch_size=batch_size,
+                verbose=False,
+                progress=False,
+                pool_sort=False,
+                **kwargs
+            )
+            df.to_torch(outdir, verbose=False)
+
         return outdir
 
     @auto_dataset
@@ -2097,9 +2205,11 @@ class Project:
                 generate predictions for all project tfrecords at the
                 tile_px/tile_um matching the model, optionally using provided
                 filters and filter_blank.
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             min_tiles (int, optional): Minimum tiles per slide. Skip slides
                 not meeting this threshold. Defaults to 8.
@@ -2238,10 +2348,12 @@ class Project:
                 the supplied model, optionally using filters/filter_blank.
 
         Keyword Args:
-            filters (dict, optional): Filters dict to use when selecting
-                tfrecords. Defaults to None.
-            filter_blank (list, optional): Slides blank in these columns will
-                be excluded. Defaults to None.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
+                Defaults to None.
             outcomes (list, optional): Column name in annotations file from
                 which to read category labels.
             map_slide (str, optional): None (default), 'centroid' or 'average'.
@@ -2428,7 +2540,7 @@ class Project:
 
         Keyword Args:
             dataset (:class:`slideflow.Dataset`): Dataset object.
-            model (str, optional): Path to Tensorflow model to use when
+            model (str, optional): Path to model to use when
                 generating layer activations.
             Defaults to None.
                 If not provided, mosaic will not be calculated or saved.
@@ -2576,9 +2688,11 @@ class Project:
                 (str, e.g. "20x").
 
         Keyword Args:
-            filters (dict, optional): Filters for selecting tfrecords.
-                Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             min_tiles (int, optional): Min tiles a slide must have.
                 Defaults to 0.
@@ -2650,9 +2764,11 @@ class Project:
                 generate predictions for all project tfrecords at the
                 tile_px/tile_um matching the model, optionally using provided
                 filters and filter_blank.
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             min_tiles (int, optional): Min tiles a slide must have
                 to be included. Defaults to 0.
@@ -2849,9 +2965,11 @@ class Project:
                 from which to generate activations. If not supplied, will
                 calculate activations for all tfrecords at the tile_px/tile_um
                 matching the supplied model.
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             min_tiles (int, optional): Min tiles a slide must have
                 to be included. Defaults to 0.
@@ -3229,9 +3347,11 @@ class Project:
 
         Keyword Args:
             exp_label (str, optional): Experiment label to add model names.
-            filters (dict, optional): Filters to use when selecting tfrecords.
-                Defaults to None.
-            filter_blank (list, optional): Exclude slides blank in these cols.
+            filters (dict, optional): Dataset filters to use for
+                selecting slides. See :meth:`slideflow.Dataset.filter` for
+                more information. Defaults to None.
+            filter_blank (list(str) or str, optional): Skip slides that have
+                blank values in these patient annotation columns.
                 Defaults to None.
             input_header (list, optional): List of annotation column headers to
                 use as additional slide-level model input. Defaults to None.
@@ -3277,6 +3397,7 @@ class Project:
             val_annotations (str): Path to annotations file for validation
                 dataset. Defaults to None (same as training).
             val_filters (dict): Filters to use for validation dataset.
+                See :meth:`slideflow.Dataset.filter` for more information.
                 Defaults to None (same as training).
             checkpoint (str, optional): Path to cp.ckpt from which to load
                 weights. Defaults to None.
@@ -3284,8 +3405,8 @@ class Project:
                 model from which to load weights. Defaults to 'imagenet'.
             multi_gpu (bool): Train using multiple GPUs when available.
                 Defaults to False.
-            resume_training (str, optional): Path to Tensorflow model to
-                continue training. Defaults to None.
+            resume_training (str, optional): Path to model to continue training.
+                Only valid in Tensorflow backend. Defaults to None.
             starting_epoch (int): Start training at the specified epoch.
                 Defaults to 0.
             steps_per_epoch_override (int): If provided, will manually set the
@@ -3302,7 +3423,7 @@ class Project:
             validation_batch_size (int): Validation dataset batch size.
                 Defaults to 32.
             use_tensorboard (bool): Add tensorboard callback for realtime
-                training monitoring. Defaults to False.
+                training monitoring. Defaults to True.
             validation_steps (int): Number of steps of validation to perform
                 each time doing a mid-epoch validation check. Defaults to 200.
 
@@ -3574,6 +3695,8 @@ class Project:
         exp_label: Optional[str] = None,
         outcomes: Optional[Union[str, List[str]]] = None,
         dataset_kwargs: Optional[Dict[str, Any]] = None,
+        normalizer: Optional[Union[str, "sf.norm.StainNormalizer"]] = None,
+        normalizer_source: Optional[str] = None,
         **kwargs
     ) -> None:
         """Train SimCLR model.
@@ -3611,7 +3734,7 @@ class Project:
             join(self.root, 'simclr'), exp_label
         )
 
-        # get base SimCLR args/settings if not provided
+        # Get base SimCLR args/settings if not provided
         if not simclr_args:
             simclr_args = simclr.get_args()
         assert isinstance(simclr_args, simclr.SimCLR_Args)
@@ -3622,7 +3745,9 @@ class Project:
             train_dts=train_dataset,
             val_dts=val_dataset,
             labels=outcomes,
-            dataset_kwargs=dataset_kwargs
+            dataset_kwargs=dataset_kwargs,
+            normalizer=normalizer,
+            normalizer_source=normalizer_source
         )
         simclr.run_simclr(simclr_args, builder, model_dir=outdir, **kwargs)
 
@@ -3890,8 +4015,13 @@ def create(
     # Set up project at the given directory.
     log.info(f"Setting up project at {root}")
     if 'annotations' in cfg:
-        proj_kwargs['annotations'] = join(root, basename(cfg.annotations))
+        if root.startswith('.'):
+            proj_kwargs['annotations'] = join('.', basename(cfg.annotations))
+        else:
+            proj_kwargs['annotations'] = join(root, basename(cfg.annotations))
+
     P = sf.Project(root, **proj_kwargs, create=True)
+
     # Download annotations, if a URL.
     if 'annotations' in cfg and cfg.annotations.startswith('http'):
         log.info(f"Downloading {cfg.annotations}")
