@@ -25,7 +25,8 @@ RUN wget https://raw.githubusercontent.com/jamesdolezal/slideflow/2.0.1/scripts/
     chmod +x pixman_repair.sh
 
 # Install missing requirements
-RUN pip3 install jupyterlab && \
+RUN pip3 install "jupyterlab>=3" && \
+    pip3 install "ipywidgets>=7.6" && \
     pip3 install huggingface_hub && \
     pip3 install "timm<0.9" && \
     pip3 install fastai && \
