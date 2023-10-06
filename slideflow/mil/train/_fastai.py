@@ -8,7 +8,15 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn import __version__ as sklearn_version
 from packaging import version
 from fastai.vision.all import (
-    DataLoader, DataLoaders, Learner, RocAuc, SaveModelCallback, CSVLogger, FetchPredsCallback, EarlyStoppingCallback
+    DataLoader,
+    DataLoaders,
+    Learner,
+    RocAuc,
+    APScoreMulti,
+    SaveModelCallback,
+    CSVLogger,
+    FetchPredsCallback,
+    EarlyStoppingCallback,
 )
 
 from neptune.integrations.fastai import NeptuneCallback
@@ -22,8 +30,15 @@ from .._params import TrainerConfigFastAI, ModelConfigCLAM
 # -----------------------------------------------------------------------------
 
 
-def train(learner, config, callbacks=None, use_neptune=False, 
-          neptune_workspace=None, neptune_api=None, neptune_name=None):
+def train(
+    learner,
+    config,
+    callbacks=None,
+    use_neptune=False,
+    neptune_workspace=None,
+    neptune_api=None,
+    neptune_name=None,
+):
     """Train an attention-based multi-instance learning model with FastAI.
 
     Args:
@@ -41,13 +56,19 @@ def train(learner, config, callbacks=None, use_neptune=False,
     """
 
     cbs = [
-        EarlyStoppingCallback(monitor="average_precision_score", comp=np.greater, patience=5),
-        SaveModelCallback(monitor="average_precision_score", comp=np.greater, fname=f"best_valid"),
+        EarlyStoppingCallback(
+            monitor="average_precision_score", comp=np.greater, patience=5
+        ),
+        SaveModelCallback(
+            monitor="average_precision_score", comp=np.greater, fname=f"best_valid"
+        ),
         CSVLogger(),
     ]
 
     if use_neptune:
-        run = neptune.init_run(project=neptune_workspace,api_token=neptune_api,name=neptune_name)
+        run = neptune.init_run(
+            project=neptune_workspace, api_token=neptune_api, name=neptune_name
+        )
         cbs.append(NeptuneCallback(run=run))
     if callbacks:
         cbs += callbacks
@@ -69,7 +90,9 @@ def train(learner, config, callbacks=None, use_neptune=False,
         run.stop()
     return learner
 
+
 # -----------------------------------------------------------------------------
+
 
 def build_learner(config, *args, **kwargs) -> Tuple[Learner, Tuple[int, int]]:
     """Build a FastAI learner for training an MIL model.
@@ -145,10 +168,7 @@ def _build_clam_learner(
 
     # Build dataloaders.
     train_dataset = build_clam_dataset(
-        bags[train_idx],
-        targets[train_idx],
-        encoder=encoder,
-        bag_size=config.bag_size
+        bags[train_idx], targets[train_idx], encoder=encoder, bag_size=config.bag_size
     )
     train_dl = DataLoader(
         train_dataset,
@@ -156,13 +176,10 @@ def _build_clam_learner(
         shuffle=True,
         num_workers=8,
         drop_last=False,
-        device=device
+        device=device,
     )
     val_dataset = build_clam_dataset(
-        bags[val_idx],
-        targets[val_idx],
-        encoder=encoder,
-        bag_size=None
+        bags[val_idx], targets[val_idx], encoder=encoder, bag_size=None
     )
     val_dl = DataLoader(
         val_dataset,
@@ -170,7 +187,7 @@ def _build_clam_learner(
         shuffle=False,
         num_workers=8,
         persistent_workers=True,
-        device=device
+        device=device,
     )
 
     # Prepare model.
@@ -179,8 +196,10 @@ def _build_clam_learner(
     n_classes = batch[-1].shape[-1]
     config_size = config.model_fn.sizes[config.model_config.model_size]
     model_size = [n_features] + config_size[1:]
-    log.info(f"Training model {config.model_fn.__name__} "
-             f"(size={model_size}, loss={config.loss_fn.__name__})")
+    log.info(
+        f"Training model {config.model_fn.__name__} "
+        f"(size={model_size}, loss={config.loss_fn.__name__})"
+    )
     model = config.model_fn(size=model_size, n_classes=n_classes)
 
     model.relocate()
@@ -190,7 +209,13 @@ def _build_clam_learner(
 
     # Create learning and fit.
     dls = DataLoaders(train_dl, val_dl)
-    learner = Learner(dls, model, loss_func=loss_func, metrics=[loss_utils.RocAuc(), loss_utils.AveragePrecision()], path=outdir)
+    learner = Learner(
+        dls,
+        model,
+        loss_func=loss_func,
+        metrics=[loss_utils.RocAuc(), loss_utils.AveragePrecision()],
+        path=outdir,
+    )
 
     return learner, (n_features, n_classes)
 
@@ -244,7 +269,7 @@ def _build_fastai_learner(
         targets[train_idx],
         encoder=encoder,
         bag_size=config.bag_size,
-        use_lens=config.model_config.use_lens
+        use_lens=config.model_config.use_lens,
     )
     train_dl = DataLoader(
         train_dataset,
@@ -252,14 +277,14 @@ def _build_fastai_learner(
         shuffle=True,
         num_workers=8,
         drop_last=False,
-        device=device
+        device=device,
     )
     val_dataset = build_dataset(
         bags[val_idx],
         targets[val_idx],
         encoder=encoder,
         bag_size=None,
-        use_lens=config.model_config.use_lens
+        use_lens=config.model_config.use_lens,
     )
     val_dl = DataLoader(
         val_dataset,
@@ -267,16 +292,18 @@ def _build_fastai_learner(
         shuffle=False,
         num_workers=8,
         persistent_workers=True,
-        device=device
+        device=device,
     )
 
     # Prepare model.
     batch = train_dl.one_batch()
     n_in, n_out = batch[0].shape[-1], batch[-1].shape[-1]
-    log.info(f"Training model {config.model_fn.__name__} "
-             f"(in={n_in}, out={n_out}, loss={config.loss_fn.__name__})")
+    log.info(
+        f"Training model {config.model_fn.__name__} "
+        f"(in={n_in}, out={n_out}, loss={config.loss_fn.__name__})"
+    )
     model = config.model_fn(n_in, n_out).to(device)
-    if hasattr(model, 'relocate'):
+    if hasattr(model, "relocate"):
         model.relocate()
 
     # Loss should weigh inversely to class occurences.
@@ -290,6 +317,8 @@ def _build_fastai_learner(
 
     # Create learning and fit.
     dls = DataLoaders(train_dl, val_dl)
-    learner = Learner(dls, model, loss_func=loss_func, metrics=[RocAuc()], path=outdir)
+    learner = Learner(
+        dls, model, loss_func=loss_func, metrics=[RocAuc(), APScoreMulti()], path=outdir
+    )
 
     return learner, (n_in, n_out)
