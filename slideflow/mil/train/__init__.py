@@ -467,6 +467,11 @@ def build_fastai_learner(
         len(train_idx), len(train_slides)))
     log.info("Validation dataset: {} merged bags (from {} possible slides)".format(
         len(val_idx), len(val_slides)))
+    
+    # NB:
+    # for slide-level: bags -> flat array of slide names; len = num slides.
+    # for patient-level: bags -> nested array with lists of slide names; len = num patients.
+    # targets -> flat array of labels; len = len(bags).
 
     # Build FastAI Learner
     learner, (n_in, n_out) = _fastai.build_learner(

@@ -132,6 +132,7 @@ def _build_clam_learner(
         encoder=encoder,
         bag_size=config.bag_size
     )
+    # -> (features, targets.squeeze(), True), targets.squeeze()
     train_dl = DataLoader(
         train_dataset,
         batch_size=1,
@@ -231,6 +232,7 @@ def _build_fastai_learner(
         bag_size=config.bag_size,
         use_lens=config.model_config.use_lens
     )
+    # -> return (features, targets.squeeze())
     train_dl = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
