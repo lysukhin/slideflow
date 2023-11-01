@@ -644,11 +644,13 @@ def train_fastai(
     from . import _fastai
 
     # Prepare validation bags.
+    # 'bags' is str here.
+    # NB: these 'val_bags' won't be used at training, only in the end at custom sf evaluation.
     if isinstance(bags, str) or (isinstance(bags, list) and isdir(bags[0])):
         val_bags = val_dataset.pt_files(bags)
     else:
         val_bags = np.array([b for b in bags if sf.util.path_to_name(b) in val_dataset.slides()])
-
+    
     # Build learner.
     learner, (n_in, n_out) = build_fastai_learner(
         config,
@@ -694,25 +696,45 @@ def train_fastai(
         columns={c: f"{outcome_name}-{c}" for c in df.columns if c != 'slide'},
         inplace=True
     )
-    sf.stats.metrics.categorical_metrics(df, level='slide')
+    sf.stats.metrics.categorical_metrics(df, level='slide', data_dir=outdir)
+
+    if not attention:
+        return learner
+
+    val_bags = learner.dls.valid_ds._datasets[0].bags
+    assert len(val_bags) == len(attention)
+
+    if isinstance(val_bags[0], str):
+        val_slides = [path_to_name(b) for b in val_bags]
+    else:
+        val_slides = [
+            [path_to_name(b) for b in val_bag]
+            for val_bag in val_bags
+        ]
 
     # Export attention to numpy arrays
-    if attention:
-        _export_attention(
-            join(outdir, 'attention'),
-            attention,
-            [path_to_name(b) for b in val_bags]
-        )
+    _export_attention(
+        join(outdir, 'attention'),
+        attention,
+        val_slides
+    )
+
+    if not attention_heatmaps:
+        return learner
+
+    if isinstance(val_bags[0], list):
+        val_bags = sum(val_bags, [])
+        assert isinstance(attention[0], list)
+        attention = sum(attention, [])
 
     # Attention heatmaps.
-    if attention and attention_heatmaps:
-        generate_attention_heatmaps(
-            outdir=join(outdir, 'heatmaps'),
-            dataset=val_dataset,
-            bags=val_bags,
-            attention=attention,
-            **heatmap_kwargs
-        )
+    generate_attention_heatmaps(
+        outdir=join(outdir, 'heatmaps'),
+        dataset=val_dataset,
+        bags=val_bags,
+        attention=attention,
+        **heatmap_kwargs
+    )
 
     return learner
 

@@ -160,6 +160,10 @@ def _build_clam_learner(
 
     # Prepare model.
     batch = train_dl.one_batch()
+    # -> [
+    # ((b x F), (b x K), 1), 
+    # (b x K)
+    # ]; b = 1
     n_features = batch[0][0].shape[-1]
     n_classes = batch[-1].shape[-1]
     config_size = config.model_fn.sizes[config.model_config.model_size]
