@@ -1098,48 +1098,62 @@ def location_heatmap(
         }
     }
 
-    masked_grid = map_values_to_slide_grid(
-        locations, values, wsi, background=background, interpolation=interpolation
-    )
+    min_value = values.min()
+    max_value = values.max()
+    if values.ndim > 1:
+        assert values.ndim == 2
+        num_classes = values.shape[0]
+    else:
+        num_classes = 1
+        values = [values]
 
-    fig = plt.figure(figsize=(18, 16))
-    ax = fig.add_subplot(111)
-    fig.subplots_adjust(bottom=0.25, top=0.95)
-    gca = plt.gca()
-    gca.tick_params(
-        axis='x',
-        top=True,
-        labeltop=True,
-        bottom=False,
-        labelbottom=False
-    )
-    thumb = wsi.thumb(mpp=5)
-    ax.imshow(thumb, zorder=0)
-
-    # Calculate overlay offset
-    extent = sf.heatmap.calculate_heatmap_extent(wsi, thumb, masked_grid)
-
-    # Plot
-    if norm == 'two_slope':
-        norm = mcol.TwoSlopeNorm(
-            vmin=min(-0.01, min(values)),
-            vcenter=0,
-            vmax=max(0.01, max(values))
+    for i in range(num_classes):
+        masked_grid = map_values_to_slide_grid(
+            locations, values[i], wsi, background=background, interpolation=interpolation
         )
-    ax.imshow(
-        masked_grid,
-        zorder=10,
-        alpha=0.6,
-        extent=extent,
-        interpolation=interpolation,
-        cmap=cmap,
-        norm=norm
-    )
-    ax.set_xlim(0, thumb.size[0])
-    ax.set_ylim(thumb.size[1], 0)
-    log.debug('Saving figure...')
-    plt.savefig(join(outdir, f'{slide_name}_attn.png'), bbox_inches='tight')
-    plt.close(fig)
+
+        fig = plt.figure(figsize=(18, 16))
+        ax = fig.add_subplot(111)
+        fig.subplots_adjust(bottom=0.25, top=0.95)
+        gca = plt.gca()
+        gca.tick_params(
+            axis='x',
+            top=True,
+            labeltop=True,
+            bottom=False,
+            labelbottom=False
+        )
+        thumb = wsi.thumb(mpp=5)
+        ax.imshow(thumb, zorder=0)
+
+        # Calculate overlay offset
+        extent = sf.heatmap.calculate_heatmap_extent(wsi, thumb, masked_grid)
+
+        # Plot
+        if norm == 'two_slope':
+            norm = mcol.TwoSlopeNorm(
+                vmin=min(-0.01, min_value),
+                vcenter=0,
+                vmax=max(0.01, max_value)
+            )
+        ax.imshow(
+            masked_grid,
+            zorder=10,
+            alpha=0.6,
+            extent=extent,
+            interpolation=interpolation,
+            cmap=cmap,
+            norm=norm
+        )
+        ax.set_xlim(0, thumb.size[0])
+        ax.set_ylim(thumb.size[1], 0)
+        log.debug('Saving figure...')
+        if num_classes == 1:
+            plt.savefig(join(outdir, f'{slide_name}_attn.png'), bbox_inches='tight')
+        else:
+            plt.savefig(join(outdir, f'{slide_name}_class{i}_attn.png'), bbox_inches='tight')
+        plt.close(fig)
+
     del wsi
     del thumb
     return stats
