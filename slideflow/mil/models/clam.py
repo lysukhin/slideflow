@@ -88,7 +88,7 @@ class _CLAM_Base(nn.Module):
         size: Union[str, List[int]] = "small",
         dropout: bool = False,
         k_sample: int = 8,
-        n_classes: int = 2,
+        n_classes: int = 3,
         instance_loss_fn: Optional[Callable] = None,
         subtyping: bool = False,
         gate: bool = True,

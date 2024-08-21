@@ -1013,6 +1013,7 @@ def map_values_to_slide_grid(
     elif background == 'max':
         grid[:] = np.max(values)
     else:
+        # TODO: set value
         raise ValueError(f"Unrecognized value for background: {background}")
 
     if not isinstance(locations, np.ndarray):

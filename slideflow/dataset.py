@@ -2784,12 +2784,12 @@ class Dataset:
                     'outcome_label': labels[slide],
                     'slides': [slide]
                 }
-            elif patients_dict[patient]['outcome_label'] != labels[slide]:
-                ol = patients_dict[patient]['outcome_label']
-                ok = labels[slide]
-                raise errors.DatasetSplitError(
-                    f"Multiple labels found for {patient} ({ol}, {ok})"
-                )
+            # elif patients_dict[patient]['outcome_label'] != labels[slide]:
+                # ol = patients_dict[patient]['outcome_label']
+                # ok = labels[slide]
+                # raise errors.DatasetSplitError(
+                    # f"Multiple labels found for {patient} ({ol}, {ok})"
+                # )
             else:
                 patients_dict[patient]['slides'] += [slide]
 

@@ -453,7 +453,7 @@ def generate_attention_heatmaps(
 
 
     """
-    assert len(bags) == len(attention)
+    assert len(bags) == len(attention), f"{len(bags)} != {len(attention)}"
     if not exists(outdir):
         os.makedirs(outdir)
     pb = Progress(transient=True)
@@ -500,11 +500,13 @@ def _export_attention(dest: str, y_att: List[np.ndarray], slides: List[str]) -> 
 
     for bag_slides, bag_attns in zip(slides, y_att):
         if isinstance(bag_slides, str):
+            # case of slide-level training, i.e. 1 bag = 1 slide always
             assert isinstance(bag_attns, np.ndarray)
             bag_slides = [bag_slides]
             bag_attns = [bag_attns]
         else:
-            assert isinstance(bag_attns, list), type(bag_attns)
+            # case of patient-level training, i.e. 1 bag = N slides
+            assert isinstance(bag_attns, list), bag_attns.shape # type(bag_attns)
             assert isinstance(bag_attns[0], np.ndarray), type(bag_attns[0])
             assert len(bag_slides) == len(bag_attns)
 

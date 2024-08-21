@@ -36,15 +36,17 @@ class Attention_MIL(nn.Module):
         )
 
     def forward(self, bags, lens):
+        # bags: B x N_max x F
+        # lens: B x 1 (?)
         assert bags.ndim == 3
         assert bags.shape[0] == lens.shape[0]
 
-        embeddings = self.encoder(bags)
+        embeddings = self.encoder(bags) # -> B x N_max x Z
 
-        masked_attention_scores = self._masked_attention_scores(embeddings, lens)
-        weighted_embedding_sums = (masked_attention_scores * embeddings).sum(-2)
+        masked_attention_scores = self._masked_attention_scores(embeddings, lens)   # -> B x N_max x 1
+        weighted_embedding_sums = (masked_attention_scores * embeddings).sum(-2)    # -> B x Z
 
-        scores = self.head(weighted_embedding_sums)
+        scores = self.head(weighted_embedding_sums) # -> B x C
 
         return scores
 
@@ -59,8 +61,9 @@ class Attention_MIL(nn.Module):
              *  The attention score of instance i of bag j if i < len[j]
              *  0 otherwise
         """
+        # embeddings: B x N_max x Z
         bs, bag_size = embeddings.shape[0], embeddings.shape[1]
-        attention_scores = self.attention(embeddings)
+        attention_scores = self.attention(embeddings)   # -> B x N_max x 1
 
         # a tensor containing a row [0, ..., bag_size-1] for each batch instance
         idx = torch.arange(bag_size).repeat(bs, 1).to(attention_scores.device)
@@ -71,7 +74,7 @@ class Attention_MIL(nn.Module):
         masked_attention = torch.where(
             attention_mask, attention_scores, torch.full_like(attention_scores, -torch.inf)
         )
-        return torch.softmax(masked_attention, dim=1)
+        return torch.softmax(masked_attention, dim=1)   # -> B x N_max x 1
 
     def relocate(self):
         """Move model to GPU. Required for FastAI compatibility."""

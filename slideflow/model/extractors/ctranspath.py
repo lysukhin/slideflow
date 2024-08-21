@@ -597,7 +597,8 @@ class CTransPathFeatures(BaseFeatureExtractor):
         # ---------------------------------------------------------------------
         self.num_features = 768
         self.num_classes = 0
-        all_transforms = [transforms.CenterCrop(224)] if center_crop else []
+        # all_transforms = [transforms.CenterCrop(224)] if center_crop else []
+        all_transforms = [transforms.Resize(224)] if center_crop else []
         all_transforms += [
             transforms.Lambda(lambda x: x / 255.),
             transforms.Normalize(
